@@ -1,10 +1,12 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
-import { storage } from "./storage";
+import { storage, sqliteClient } from "./storage";
 import session from "express-session";
 import passport from "passport";
 import { Strategy as LocalStrategy } from "passport-local";
 import bcrypt from "bcryptjs";
+import rateLimit from "express-rate-limit";
+import BetterSqlite3SessionStore from "better-sqlite3-session-store";
 
 // Extend session type
 declare module "express-session" {
@@ -15,9 +17,9 @@ declare module "express-session" {
 
 // ========== TELLABOT API INTEGRATION ==========
 const TELLABOT_BASE = "https://www.tellabot.com/api_command.php";
-const TELLABOT_USER = process.env.TELLABOT_USER || "siyamhasan4@gmail.com";
-const TELLABOT_KEY = process.env.TELLABOT_API_KEY || "hGwpWflQbP0i0Lz2ls2IkJ8dTDyYMLxt";
-const MARKUP_MULTIPLIER = 1.5; // 50% markup on TellaBot cost
+const TELLABOT_USER = process.env.TELLABOT_USER!;
+const TELLABOT_KEY = process.env.TELLABOT_API_KEY!;
+const MARKUP_MULTIPLIER = parseFloat(process.env.TELLABOT_MARKUP || "1.5");
 
 // Service category mapping for popular services
 const SERVICE_CATEGORIES: Record<string, string> = {
@@ -97,19 +99,23 @@ function extractOTPFromText(text: string): string | null {
   return null;
 }
 
-// Crypto wallet addresses
+// Crypto wallet addresses (from env)
 const CRYPTO_WALLETS: Record<string, string> = {
-  BTC: "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",
-  ETH: "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
-  USDT_TRC20: "TN2Y5mFKbE2BC3RLeFz4BEMnGpGEaVNbHv",
-  USDT_ERC20: "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
-  USDC: "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
-  LTC: "ltc1qw508d6qejxtdg4y5r3zarvary0c5xw7kgmn4n9",
+  BTC: process.env.CRYPTO_WALLET_BTC || "",
+  ETH: process.env.CRYPTO_WALLET_ETH || "",
+  USDT_TRC20: process.env.CRYPTO_WALLET_USDT_TRC20 || "",
+  USDT_ERC20: process.env.CRYPTO_WALLET_USDT_ERC20 || "",
+  USDC: process.env.CRYPTO_WALLET_USDC || "",
+  LTC: process.env.CRYPTO_WALLET_LTC || "",
 };
 
 const CRYPTO_RATES: Record<string, number> = {
-  BTC: 84250.00, ETH: 3420.00, USDT_TRC20: 1.00,
-  USDT_ERC20: 1.00, USDC: 1.00, LTC: 92.50,
+  BTC: parseFloat(process.env.CRYPTO_RATE_BTC || "84250"),
+  ETH: parseFloat(process.env.CRYPTO_RATE_ETH || "3420"),
+  USDT_TRC20: parseFloat(process.env.CRYPTO_RATE_USDT || "1"),
+  USDT_ERC20: parseFloat(process.env.CRYPTO_RATE_USDT || "1"),
+  USDC: parseFloat(process.env.CRYPTO_RATE_USDC || "1"),
+  LTC: parseFloat(process.env.CRYPTO_RATE_LTC || "92.50"),
 };
 
 export async function registerRoutes(
@@ -117,13 +123,30 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
 
-  // Session setup
+  // Session setup with SQLite-backed store
+  const SqliteStore = BetterSqlite3SessionStore(session);
+
+  const isProduction = process.env.NODE_ENV === "production";
+
+  if (!process.env.SESSION_SECRET) {
+    console.warn("WARNING: SESSION_SECRET not set. Using insecure default. Set it in .env for production!");
+  }
+
   app.use(
     session({
-      secret: process.env.SESSION_SECRET || "getotps-secret-key-2024",
+      store: new SqliteStore({
+        client: sqliteClient,
+        expired: { clear: true, intervalMs: 15 * 60 * 1000 }, // cleanup every 15 min
+      }),
+      secret: process.env.SESSION_SECRET || "getotps-dev-insecure-fallback",
       resave: false,
       saveUninitialized: false,
-      cookie: { secure: false, maxAge: 7 * 24 * 60 * 60 * 1000 },
+      cookie: {
+        secure: isProduction,
+        httpOnly: true,
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+        sameSite: "lax",
+      },
     })
   );
 
@@ -164,9 +187,41 @@ export async function registerRoutes(
     res.status(403).json({ message: "Forbidden" });
   }
 
+  // ========== RATE LIMITING ==========
+
+  // Strict limiter for auth routes (login, register)
+  const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 10, // 10 attempts per window
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message: "Too many attempts. Please try again in 15 minutes." },
+  });
+
+  // General API limiter
+  const apiLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 60, // 60 requests per minute
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message: "Too many requests. Please slow down." },
+  });
+
+  // Order creation limiter (prevents abuse)
+  const orderLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 10, // 10 orders per minute
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message: "Too many order requests. Please slow down." },
+  });
+
+  // Apply general API limiter to all /api routes
+  app.use("/api", apiLimiter);
+
   // ========== AUTH ROUTES ==========
 
-  app.post("/api/auth/register", async (req, res) => {
+  app.post("/api/auth/register", authLimiter, async (req, res) => {
     try {
       const { username, email, password } = req.body;
       if (!username || !email || !password) {
@@ -190,7 +245,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/auth/login", (req, res, next) => {
+  app.post("/api/auth/login", authLimiter, (req, res, next) => {
     passport.authenticate("local", (err: any, user: any, info: any) => {
       if (err) return res.status(500).json({ message: err.message });
       if (!user) return res.status(401).json({ message: info?.message || "Invalid credentials" });
@@ -242,7 +297,7 @@ export async function registerRoutes(
 
   // ========== ORDERS (TellaBot-backed) ==========
 
-  app.post("/api/orders", requireAuth, async (req, res) => {
+  app.post("/api/orders", requireAuth, orderLimiter, async (req, res) => {
     try {
       const user = req.user as any;
       const { serviceId, serviceName } = req.body;
@@ -315,7 +370,7 @@ export async function registerRoutes(
         amount: `-${service.price}`,
         description: `${service.name} number rental`,
         orderId: order.id,
-        stripeSessionId: null,
+        paymentRef: null,
         createdAt: now.toISOString(),
       });
 
@@ -396,8 +451,11 @@ export async function registerRoutes(
     }
   });
 
-  // Keep simulate-sms for demo/fallback (when TellaBot balance is low)
+  // Simulate-sms: development only (disabled in production)
   app.post("/api/orders/:id/simulate-sms", requireAuth, async (req, res) => {
+    if (process.env.NODE_ENV === "production") {
+      return res.status(403).json({ message: "Simulation endpoints are disabled in production" });
+    }
     try {
       const user = req.user as any;
       const order = await storage.getOrder(Number(req.params.id));
@@ -445,7 +503,7 @@ export async function registerRoutes(
           amount: order.price,
           description: "Order cancelled - refund",
           orderId: order.id,
-          stripeSessionId: null,
+          paymentRef: null,
           createdAt: new Date().toISOString(),
         });
       }
@@ -475,6 +533,23 @@ export async function registerRoutes(
     res.json(currencies);
   });
 
+  // Generate a unique amount for USDT TRC20 deposits (avoids collision)
+  async function generateUniqueUsdtAmount(baseAmount: number): Promise<string> {
+    const maxAttempts = 20;
+    for (let i = 0; i < maxAttempts; i++) {
+      // Add random 4-digit suffix: e.g. 10.00 -> 10.003847
+      const suffix = Math.floor(Math.random() * 9999) + 1; // 0001-9999
+      const unique = baseAmount + suffix / 1000000; // add as micro-dollars (6 decimal precision)
+      const uniqueStr = unique.toFixed(6);
+      // Check no pending deposit already uses this amount
+      const existing = await storage.getPendingDepositByUniqueAmount(uniqueStr);
+      if (!existing) return uniqueStr;
+    }
+    // Fallback: very unlikely to reach here
+    const fallback = baseAmount + (Math.floor(Math.random() * 99999) + 1) / 1000000;
+    return fallback.toFixed(6);
+  }
+
   app.post("/api/crypto/create-deposit", requireAuth, async (req, res) => {
     try {
       const user = req.user as any;
@@ -488,9 +563,20 @@ export async function registerRoutes(
       const cryptoAmount = (usdAmount / rate).toFixed(8);
       const now = new Date();
       const expiresAt = new Date(now.getTime() + 60 * 60 * 1000);
+
+      // For USDT TRC20: generate a unique amount for auto-matching
+      let uniqueAmount: string | null = null;
+      if (currency === "USDT_TRC20") {
+        uniqueAmount = await generateUniqueUsdtAmount(usdAmount);
+      }
+
       const deposit = await storage.createCryptoDeposit({
-        userId: user.id, currency, amount: usdAmount.toFixed(2), cryptoAmount,
-        walletAddress, txHash: null, status: "pending",
+        userId: user.id, currency, amount: usdAmount.toFixed(2),
+        cryptoAmount: currency === "USDT_TRC20" ? uniqueAmount! : cryptoAmount,
+        uniqueAmount,
+        walletAddress, txHash: null,
+        trongridTxId: null, confirmedAmount: null,
+        status: "pending",
         createdAt: now.toISOString(), expiresAt: expiresAt.toISOString(), completedAt: null,
       });
       res.json(deposit);
@@ -517,6 +603,9 @@ export async function registerRoutes(
   });
 
   app.post("/api/crypto/:id/simulate-confirm", requireAuth, async (req, res) => {
+    if (process.env.NODE_ENV === "production") {
+      return res.status(403).json({ message: "Simulation endpoints are disabled in production" });
+    }
     try {
       const user = req.user as any;
       const deposit = await storage.getCryptoDeposit(Number(req.params.id));
@@ -532,7 +621,7 @@ export async function registerRoutes(
         await storage.createTransaction({
           userId: user.id, type: "deposit", amount: deposit.amount,
           description: `Crypto deposit (${deposit.currency}) confirmed`,
-          orderId: null, stripeSessionId: null, createdAt: now,
+          orderId: null, paymentRef: null, createdAt: now,
         });
       }
       res.json({ message: "Deposit confirmed", newBalance: (parseFloat(freshUser!.balance) + parseFloat(deposit.amount)).toFixed(2) });
@@ -553,7 +642,7 @@ export async function registerRoutes(
         await storage.createTransaction({
           userId: deposit.userId, type: "deposit", amount: deposit.amount,
           description: `Crypto deposit (${deposit.currency}) confirmed by admin`,
-          orderId: null, stripeSessionId: null, createdAt: now,
+          orderId: null, paymentRef: null, createdAt: now,
         });
       }
       res.json({ message: "Deposit confirmed and balance credited" });
@@ -562,6 +651,10 @@ export async function registerRoutes(
 
   app.get("/api/admin/crypto/pending", requireAdmin, async (_req, res) => {
     res.json(await storage.getAllPendingCryptoDeposits());
+  });
+
+  app.get("/api/admin/crypto/all", requireAdmin, async (_req, res) => {
+    res.json(await storage.getAllCryptoDeposits());
   });
 
   app.get("/api/transactions", requireAuth, async (req, res) => {
@@ -581,6 +674,14 @@ export async function registerRoutes(
     const allOrders = await storage.getAllOrders();
     const completedOrders = allOrders.filter(o => o.status === "completed" || o.status === "received");
     const revenue = completedOrders.reduce((sum, o) => sum + parseFloat(o.price), 0);
+    const cost = revenue / MARKUP_MULTIPLIER;
+    const profit = revenue - cost;
+
+    // Total crypto deposits (completed only)
+    const allDeposits = await storage.getAllCryptoDeposits();
+    const completedDeposits = allDeposits.filter(d => d.status === "completed");
+    const totalDeposited = completedDeposits.reduce((sum, d) => sum + parseFloat(d.amount), 0);
+
     // Check TellaBot balance
     let tellabotBalance = "N/A";
     try {
@@ -592,6 +693,11 @@ export async function registerRoutes(
       totalOrders: allOrders.length,
       completedOrders: completedOrders.length,
       revenue: revenue.toFixed(2),
+      cost: cost.toFixed(2),
+      profit: profit.toFixed(2),
+      markupMultiplier: MARKUP_MULTIPLIER,
+      totalDeposited: totalDeposited.toFixed(2),
+      pendingDeposits: allDeposits.filter(d => d.status === "pending" || d.status === "confirming").length,
       tellabotBalance,
     });
   });
@@ -624,7 +730,7 @@ export async function registerRoutes(
     res.json({ balance: user.balance });
   });
 
-  app.post("/api/v1/order", requireApiKey, async (req, res) => {
+  app.post("/api/v1/order", requireApiKey, orderLimiter, async (req, res) => {
     try {
       const user = (req as any).apiUser;
       const { service } = req.body;
@@ -665,7 +771,7 @@ export async function registerRoutes(
       await storage.createTransaction({
         userId: user.id, type: "purchase", amount: `-${svc.price}`,
         description: `${svc.name} number rental`, orderId: order.id,
-        stripeSessionId: null, createdAt: now.toISOString(),
+        paymentRef: null, createdAt: now.toISOString(),
       });
 
       res.json({ orderId: order.id, phoneNumber, status: "waiting", expiresAt: order.expiresAt });

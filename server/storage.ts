@@ -5,10 +5,13 @@ import { eq, and, desc, or } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 
-const sqlite = new Database("data.db");
+const sqlite = new Database(process.env.DATABASE_PATH || "data.db");
 sqlite.pragma("journal_mode = WAL");
 
 export const db = drizzle(sqlite);
+
+// Export raw sqlite instance for session store
+export { sqlite as sqliteClient };
 
 // Create tables if they don't exist
 sqlite.exec(`
@@ -56,7 +59,7 @@ sqlite.exec(`
     amount TEXT NOT NULL,
     description TEXT,
     order_id INTEGER,
-    stripe_session_id TEXT,
+    payment_ref TEXT,
     created_at TEXT NOT NULL
   );
 
@@ -66,30 +69,93 @@ sqlite.exec(`
     currency TEXT NOT NULL,
     amount TEXT NOT NULL,
     crypto_amount TEXT,
+    unique_amount TEXT,
     wallet_address TEXT NOT NULL,
     tx_hash TEXT,
+    trongrid_tx_id TEXT,
+    confirmed_amount TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     completed_at TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS deposit_poll_state (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    last_timestamp INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT ''
+  );
 `);
 
+// Migrate: rename stripe_session_id -> payment_ref for existing databases
+try {
+  const columns = sqlite.pragma("table_info(transactions)") as { name: string }[];
+  const hasOldColumn = columns.some(c => c.name === "stripe_session_id");
+  const hasNewColumn = columns.some(c => c.name === "payment_ref");
+  if (hasOldColumn && !hasNewColumn) {
+    sqlite.exec("ALTER TABLE transactions RENAME COLUMN stripe_session_id TO payment_ref");
+    console.log("Migration: renamed stripe_session_id -> payment_ref");
+  }
+} catch (err) {
+  console.error("Migration check failed (non-fatal):", err);
+}
+
+// Migrate: add TronGrid columns to crypto_deposits for existing databases
+try {
+  const cols = sqlite.pragma("table_info(crypto_deposits)") as { name: string }[];
+  const colNames = cols.map(c => c.name);
+  if (!colNames.includes("unique_amount")) {
+    sqlite.exec("ALTER TABLE crypto_deposits ADD COLUMN unique_amount TEXT");
+    console.log("Migration: added unique_amount to crypto_deposits");
+  }
+  if (!colNames.includes("trongrid_tx_id")) {
+    sqlite.exec("ALTER TABLE crypto_deposits ADD COLUMN trongrid_tx_id TEXT");
+    console.log("Migration: added trongrid_tx_id to crypto_deposits");
+  }
+  if (!colNames.includes("confirmed_amount")) {
+    sqlite.exec("ALTER TABLE crypto_deposits ADD COLUMN confirmed_amount TEXT");
+    console.log("Migration: added confirmed_amount to crypto_deposits");
+  }
+} catch (err) {
+  console.error("Crypto deposits migration failed (non-fatal):", err);
+}
+
+// Ensure deposit_poll_state table and seed row exist
+try {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS deposit_poll_state (
+      id INTEGER PRIMARY KEY DEFAULT 1,
+      last_timestamp INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT ''
+    )
+  `);
+  const pollState = sqlite.prepare("SELECT id FROM deposit_poll_state WHERE id = 1").get();
+  if (!pollState) {
+    sqlite.prepare("INSERT INTO deposit_poll_state (id, last_timestamp, updated_at) VALUES (1, 0, '')").run();
+  }
+} catch (err) {
+  console.error("deposit_poll_state init failed (non-fatal):", err);
+}
+
 async function seedDatabase() {
+  const adminEmail = process.env.ADMIN_EMAIL || "admin@getotps.com";
+  const adminPassword = process.env.ADMIN_PASSWORD || "admin123";
+  const adminUsername = process.env.ADMIN_USERNAME || "admin";
+
   // Create default admin user
-  const existingAdmin = db.select().from(users).where(eq(users.email, "admin@getotps.com")).get();
+  const existingAdmin = db.select().from(users).where(eq(users.email, adminEmail)).get();
   if (!existingAdmin) {
-    const hashedPassword = await bcrypt.hash("admin123", 10);
+    const hashedPassword = await bcrypt.hash(adminPassword, 10);
     const apiKey = crypto.randomBytes(32).toString("hex");
     db.insert(users).values({
-      username: "admin",
-      email: "admin@getotps.com",
+      username: adminUsername,
+      email: adminEmail,
       password: hashedPassword,
       balance: "100.00",
       apiKey,
       role: "admin",
     }).run();
-    console.log("Created default admin user: admin@getotps.com / admin123");
+    console.log(`Created admin user: ${adminEmail}`);
   }
 }
 
@@ -135,6 +201,12 @@ export interface IStorage {
   getUserCryptoDeposits(userId: number): Promise<CryptoDeposit[]>;
   updateCryptoDeposit(id: number, data: Partial<CryptoDeposit>): Promise<void>;
   getAllPendingCryptoDeposits(): Promise<CryptoDeposit[]>;
+  getAllCryptoDeposits(): Promise<CryptoDeposit[]>;
+  getPendingDepositByUniqueAmount(uniqueAmount: string): Promise<CryptoDeposit | undefined>;
+  depositTxIdExists(trongridTxId: string): boolean;
+  getDepositPollTimestamp(): number;
+  setDepositPollTimestamp(ts: number): void;
+  expireStalePendingDeposits(): number;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -274,6 +346,43 @@ export class DatabaseStorage implements IStorage {
 
   async getAllPendingCryptoDeposits(): Promise<CryptoDeposit[]> {
     return db.select().from(cryptoDeposits).where(eq(cryptoDeposits.status, "pending")).orderBy(desc(cryptoDeposits.id)).all();
+  }
+
+  async getAllCryptoDeposits(): Promise<CryptoDeposit[]> {
+    return db.select().from(cryptoDeposits).orderBy(desc(cryptoDeposits.id)).all();
+  }
+
+  async getPendingDepositByUniqueAmount(uniqueAmount: string): Promise<CryptoDeposit | undefined> {
+    return db.select().from(cryptoDeposits)
+      .where(and(
+        eq(cryptoDeposits.uniqueAmount, uniqueAmount),
+        or(eq(cryptoDeposits.status, "pending"), eq(cryptoDeposits.status, "confirming"))
+      ))
+      .get();
+  }
+
+  depositTxIdExists(trongridTxId: string): boolean {
+    const row = db.select({ id: cryptoDeposits.id }).from(cryptoDeposits)
+      .where(eq(cryptoDeposits.trongridTxId, trongridTxId))
+      .get();
+    return !!row;
+  }
+
+  getDepositPollTimestamp(): number {
+    const row = sqlite.prepare("SELECT last_timestamp FROM deposit_poll_state WHERE id = 1").get() as { last_timestamp: number } | undefined;
+    return row?.last_timestamp || 0;
+  }
+
+  setDepositPollTimestamp(ts: number): void {
+    sqlite.prepare("UPDATE deposit_poll_state SET last_timestamp = ?, updated_at = ? WHERE id = 1").run(ts, new Date().toISOString());
+  }
+
+  expireStalePendingDeposits(): number {
+    const now = new Date().toISOString();
+    const result = sqlite.prepare(
+      "UPDATE crypto_deposits SET status = 'expired' WHERE status = 'pending' AND expires_at < ?"
+    ).run(now);
+    return result.changes;
   }
 }
 

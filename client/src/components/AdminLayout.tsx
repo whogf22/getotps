@@ -4,45 +4,34 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useTheme } from "@/contexts/ThemeContext";
 import { Logo } from "./Logo";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import {
   LayoutDashboard,
-  ShoppingCart,
-  Phone,
-  History,
-  CreditCard,
-  BookOpen,
-  User,
+  Users,
+  Wallet,
+  Settings,
   LogOut,
   Moon,
   Sun,
   Menu,
-  X,
   ChevronLeft,
   ShieldCheck,
-  Plus,
+  ArrowLeft,
 } from "lucide-react";
 
-const navItems = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/buy", label: "Buy Number", icon: ShoppingCart },
-  { href: "/active", label: "Active Numbers", icon: Phone },
-  { href: "/history", label: "History", icon: History },
-  { href: "/funds", label: "Add Funds", icon: CreditCard },
-  { href: "/profile", label: "Account", icon: User },
-];
-
 const adminNavItems = [
-  ...navItems.slice(0, 5),
-  { href: "/api-docs", label: "API Docs", icon: BookOpen },
-  { href: "/profile", label: "Account", icon: User },
+  { href: "/admin", label: "Overview", icon: LayoutDashboard },
+  { href: "/admin/users", label: "Users", icon: Users },
+  { href: "/admin/deposits", label: "Deposits", icon: Wallet },
+  { href: "/admin/services", label: "Services", icon: Settings },
 ];
 
-interface DashboardLayoutProps {
+interface AdminLayoutProps {
   children: React.ReactNode;
+  title: string;
+  description?: string;
 }
 
-export function DashboardLayout({ children }: DashboardLayoutProps) {
+export function AdminLayout({ children, title, description }: AdminLayoutProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const { user, logout } = useAuth();
@@ -56,46 +45,35 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
 
   const SidebarContent = () => (
     <div className="flex flex-col h-full">
-      {/* Logo */}
+      {/* Logo area */}
       <div className="flex items-center justify-between p-4 border-b border-sidebar-border">
-        <Logo showText={!collapsed} size={28} />
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="w-5 h-5 text-orange-500 shrink-0" />
+          {!collapsed && <span className="font-bold text-sm">Admin Panel</span>}
+        </div>
         <button
           onClick={() => setCollapsed(!collapsed)}
           className="hidden md:flex items-center justify-center w-6 h-6 rounded text-muted-foreground hover:text-foreground transition-colors"
-          data-testid="button-collapse-sidebar"
         >
           <ChevronLeft className={`w-4 h-4 transition-transform ${collapsed ? "rotate-180" : ""}`} />
         </button>
       </div>
 
-      {/* Balance */}
-      <div className={`mx-3 my-3 p-3 rounded-lg bg-primary/10 border border-primary/20 ${collapsed ? "text-center" : ""}`}>
-        {collapsed ? (
-          <span className="text-primary font-bold text-sm">${user?.balance || "0.00"}</span>
-        ) : (
-          <div>
-            <p className="text-xs text-muted-foreground mb-0.5">Balance</p>
-            <p className="text-lg font-bold text-primary" data-testid="text-balance">${user?.balance || "0.00"}</p>
-          </div>
-        )}
-      </div>
-
       {/* Nav Items */}
-      <nav className="flex-1 px-2 py-2 space-y-0.5" data-testid="nav-sidebar">
-        {(user?.role === "admin" ? adminNavItems : navItems).map(({ href, label, icon: Icon }) => {
+      <nav className="flex-1 px-2 py-3 space-y-0.5">
+        {adminNavItems.map(({ href, label, icon: Icon }) => {
           const active = location === href;
           return (
             <Link key={href} href={href}>
               <a
                 className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all cursor-pointer
                   ${active
-                    ? "bg-sidebar-primary text-sidebar-primary-foreground"
+                    ? "bg-orange-500/15 text-orange-600 dark:text-orange-400"
                     : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
                   }
                   ${collapsed ? "justify-center" : ""}
                 `}
                 onClick={() => setMobileOpen(false)}
-                data-testid={`nav-link-${href.replace("/", "")}`}
                 title={collapsed ? label : undefined}
               >
                 <Icon className="w-4 h-4 shrink-0" />
@@ -108,21 +86,15 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
 
       {/* Bottom actions */}
       <div className="p-3 border-t border-sidebar-border space-y-1">
-        {user?.role === "admin" && (
-          <Link href="/admin">
-            <a
-              className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-orange-600 dark:text-orange-400 hover:bg-orange-500/10 w-full transition-colors ${collapsed ? "justify-center" : ""}`}
-              onClick={() => setMobileOpen(false)}
-            >
-              <ShieldCheck className="w-4 h-4 shrink-0" />
-              {!collapsed && <span>Admin Panel</span>}
-            </a>
-          </Link>
-        )}
+        <Link href="/dashboard">
+          <a className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-sidebar-foreground hover:bg-sidebar-accent w-full transition-colors ${collapsed ? "justify-center" : ""}`}>
+            <ArrowLeft className="w-4 h-4 shrink-0" />
+            {!collapsed && <span>Back to App</span>}
+          </a>
+        </Link>
         <button
           onClick={toggleTheme}
           className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-sidebar-foreground hover:bg-sidebar-accent w-full transition-colors ${collapsed ? "justify-center" : ""}`}
-          data-testid="button-toggle-theme"
         >
           {theme === "dark" ? <Sun className="w-4 h-4 shrink-0" /> : <Moon className="w-4 h-4 shrink-0" />}
           {!collapsed && <span>{theme === "dark" ? "Light Mode" : "Dark Mode"}</span>}
@@ -130,7 +102,6 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
         <button
           onClick={handleLogout}
           className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-destructive hover:bg-destructive/10 w-full transition-colors ${collapsed ? "justify-center" : ""}`}
-          data-testid="button-logout"
         >
           <LogOut className="w-4 h-4 shrink-0" />
           {!collapsed && <span>Sign Out</span>}
@@ -166,28 +137,19 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
             <button
               className="md:hidden p-1.5 rounded-lg hover:bg-accent transition-colors"
               onClick={() => setMobileOpen(!mobileOpen)}
-              data-testid="button-mobile-menu"
             >
               <Menu className="w-5 h-5" />
             </button>
-            <span className="text-sm font-medium text-muted-foreground hidden sm:block">
-              Welcome back, <span className="text-foreground">{user?.username}</span>
-            </span>
+            <div>
+              <h1 className="text-sm font-bold">{title}</h1>
+              {description && <p className="text-xs text-muted-foreground">{description}</p>}
+            </div>
           </div>
           <div className="flex items-center gap-2">
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-primary/10 border border-primary/20">
-              <span className="text-xs text-muted-foreground hidden sm:block">Balance</span>
-              <span className="text-sm font-bold text-primary" data-testid="text-header-balance">${user?.balance || "0.00"}</span>
-            </div>
-            <Link href="/funds">
-              <a>
-                <Button size="sm" variant="outline" className="text-xs h-8" data-testid="button-add-funds">
-                  <Plus className="w-3 h-3 mr-1" />
-                  <span className="hidden sm:inline">Add Funds</span>
-                  <span className="sm:hidden">Fund</span>
-                </Button>
-              </a>
-            </Link>
+            <span className="text-xs text-muted-foreground">
+              <ShieldCheck className="w-3.5 h-3.5 inline mr-1 text-orange-500" />
+              {user?.username}
+            </span>
           </div>
         </header>
 

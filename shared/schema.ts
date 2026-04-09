@@ -62,7 +62,7 @@ export const transactions = sqliteTable("transactions", {
   amount: text("amount").notNull(),
   description: text("description"),
   orderId: integer("order_id"),
-  stripeSessionId: text("stripe_session_id"),
+  paymentRef: text("payment_ref"),
   createdAt: text("created_at").notNull(),
 });
 
@@ -77,8 +77,11 @@ export const cryptoDeposits = sqliteTable("crypto_deposits", {
   currency: text("currency").notNull(), // BTC, ETH, USDT_TRC20, USDT_ERC20, USDC, LTC
   amount: text("amount").notNull(), // USD amount requested
   cryptoAmount: text("crypto_amount"), // amount in crypto
+  uniqueAmount: text("unique_amount"), // exact amount with random suffix for matching (USDT TRC20)
   walletAddress: text("wallet_address").notNull(), // our receiving address
   txHash: text("tx_hash"), // user-submitted transaction hash
+  trongridTxId: text("trongrid_tx_id"), // on-chain tx ID from TronGrid (authoritative)
+  confirmedAmount: text("confirmed_amount"), // actual amount received on-chain
   status: text("status").notNull().default("pending"), // pending/confirming/completed/expired
   createdAt: text("created_at").notNull(),
   expiresAt: text("expires_at").notNull(),

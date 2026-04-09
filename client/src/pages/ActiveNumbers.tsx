@@ -4,12 +4,11 @@ import { Link } from "wouter";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
-import { Phone, Copy, Check, X, RefreshCw, MessageSquare, Loader2 } from "lucide-react";
+import { Phone, Copy, Check, X, RefreshCw, MessageSquare, Loader2, ShoppingCart } from "lucide-react";
 
 function Countdown({ expiresAt }: { expiresAt: string }) {
   const [remaining, setRemaining] = useState("");
@@ -18,11 +17,7 @@ function Countdown({ expiresAt }: { expiresAt: string }) {
   useEffect(() => {
     const update = () => {
       const diff = new Date(expiresAt).getTime() - Date.now();
-      if (diff <= 0) {
-        setRemaining("Expired");
-        setExpired(true);
-        return;
-      }
+      if (diff <= 0) { setRemaining("Expired"); setExpired(true); return; }
       const mins = Math.floor(diff / 60000);
       const secs = Math.floor((diff % 60000) / 1000);
       setRemaining(`${mins}:${secs.toString().padStart(2, "0")}`);
@@ -33,7 +28,7 @@ function Countdown({ expiresAt }: { expiresAt: string }) {
   }, [expiresAt]);
 
   return (
-    <span className={expired ? "text-red-500" : "text-orange-500 font-mono font-medium"}>
+    <span className={`font-mono font-medium ${expired ? "text-red-500" : "text-orange-500"}`}>
       {remaining}
     </span>
   );
@@ -47,11 +42,7 @@ function CopyButton({ text }: { text: string }) {
     setTimeout(() => setCopied(false), 2000);
   };
   return (
-    <button
-      onClick={handleCopy}
-      className="p-1.5 rounded hover:bg-accent transition-colors text-muted-foreground hover:text-foreground"
-      data-testid="button-copy"
-    >
+    <button onClick={handleCopy} className="p-1.5 rounded hover:bg-accent transition-colors text-muted-foreground hover:text-foreground">
       {copied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
     </button>
   );
@@ -89,9 +80,7 @@ export default function ActiveNumbers() {
       if (data.status === "received" && data.otpCode) {
         toast({ title: "SMS Received!", description: `OTP Code: ${data.otpCode}` });
       } else if (data.status === "received") {
-        toast({ title: "SMS Received!", description: "Message found — check below" });
-      } else {
-        toast({ title: "No SMS yet", description: "Still waiting... Auto-refreshes every 5s." });
+        toast({ title: "SMS Received!", description: "Check the message below" });
       }
     },
     onError: (err: any) => {
@@ -108,13 +97,15 @@ export default function ActiveNumbers() {
 
   return (
     <DashboardLayout>
-      <div className="space-y-6">
+      <div className="space-y-5">
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-xl font-bold">Active Numbers</h1>
-            <p className="text-sm text-muted-foreground mt-0.5">Currently rented phone numbers</p>
+            <p className="text-sm text-muted-foreground mt-0.5">
+              {activeOrders?.length ? `${activeOrders.length} active number${activeOrders.length > 1 ? "s" : ""}` : "No active numbers"}
+            </p>
           </div>
-          <Button variant="outline" size="sm" onClick={() => refetch()} data-testid="button-refresh-active">
+          <Button variant="outline" size="sm" className="text-xs" onClick={() => refetch()}>
             <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
             Refresh
           </Button>
@@ -122,16 +113,16 @@ export default function ActiveNumbers() {
 
         {isLoading ? (
           <div className="grid md:grid-cols-2 gap-4">
-            {[1, 2].map(i => <Skeleton key={i} className="h-40" />)}
+            {[1, 2].map(i => <Skeleton key={i} className="h-48" />)}
           </div>
         ) : !activeOrders || activeOrders.length === 0 ? (
           <Card className="border-border">
             <CardContent className="py-16 text-center">
               <Phone className="w-10 h-10 text-muted-foreground mx-auto mb-3" />
               <p className="font-semibold mb-1">No active numbers</p>
-              <p className="text-sm text-muted-foreground mb-4">Buy a number to get started</p>
+              <p className="text-sm text-muted-foreground mb-4">Buy a number to start receiving OTP codes</p>
               <Link href="/buy">
-                <a><Button size="sm">Buy a Number</Button></a>
+                <a><Button size="sm"><ShoppingCart className="w-3.5 h-3.5 mr-1.5" />Buy a Number</Button></a>
               </Link>
             </CardContent>
           </Card>
@@ -144,8 +135,7 @@ export default function ActiveNumbers() {
               return (
                 <Card
                   key={order.id}
-                  className={`border ${order.status === "received" ? "border-green-500/40 bg-green-500/5" : "border-border"}`}
-                  data-testid={`card-order-${order.id}`}
+                  className={`border ${order.status === "received" ? "border-green-500/40 bg-green-500/[0.02]" : "border-border"}`}
                 >
                   <CardContent className="p-5">
                     {/* Header */}
@@ -166,11 +156,9 @@ export default function ActiveNumbers() {
                     </div>
 
                     {/* Phone number */}
-                    <div className="flex items-center gap-2 p-2.5 rounded-lg bg-muted/50 border border-border mb-4">
+                    <div className="flex items-center gap-2 p-3 rounded-lg bg-muted/50 border border-border mb-4">
                       <Phone className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                      <span className="text-sm font-mono flex-1 font-medium" data-testid={`text-phone-${order.id}`}>
-                        {order.phoneNumber}
-                      </span>
+                      <span className="text-sm font-mono flex-1 font-medium select-all">{order.phoneNumber}</span>
                       <CopyButton text={order.phoneNumber} />
                     </div>
 
@@ -187,12 +175,11 @@ export default function ActiveNumbers() {
 
                     {order.status === "received" && (
                       <div className="space-y-2 mb-4">
-                        {/* OTP code highlight */}
                         {order.otpCode && (
                           <div className="flex items-center justify-between p-3 rounded-lg bg-green-500/10 border border-green-500/30">
                             <div>
-                              <p className="text-xs text-muted-foreground mb-0.5">OTP Code</p>
-                              <p className="text-2xl font-bold tracking-widest text-green-600 dark:text-green-400 font-mono" data-testid={`text-otp-${order.id}`}>
+                              <p className="text-xs text-muted-foreground mb-0.5">Your OTP Code</p>
+                              <p className="text-2xl font-bold tracking-widest text-green-600 dark:text-green-400 font-mono">
                                 {order.otpCode}
                               </p>
                             </div>
@@ -200,12 +187,11 @@ export default function ActiveNumbers() {
                           </div>
                         )}
 
-                        {/* Full SMS messages */}
                         {messages.length > 0 && (
                           <div className="p-2.5 rounded-lg bg-muted/50 border border-border">
                             <div className="flex items-center gap-1.5 mb-2">
                               <MessageSquare className="w-3 h-3 text-muted-foreground" />
-                              <p className="text-xs font-semibold text-muted-foreground">Full SMS</p>
+                              <p className="text-xs font-semibold text-muted-foreground">Full Message</p>
                             </div>
                             {messages.map((msg: any, i: number) => (
                               <div key={i} className="text-xs text-foreground font-mono bg-background p-2 rounded border border-border mb-1 last:mb-0 break-all">
@@ -227,7 +213,6 @@ export default function ActiveNumbers() {
                             className="flex-1 text-xs h-8"
                             onClick={() => checkSmsMutation.mutate(order.id)}
                             disabled={checkSmsMutation.isPending}
-                            data-testid={`button-check-sms-${order.id}`}
                           >
                             {checkSmsMutation.isPending
                               ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" />Checking...</>
@@ -240,7 +225,6 @@ export default function ActiveNumbers() {
                             className="text-xs h-8 px-3"
                             onClick={() => cancelMutation.mutate(order.id)}
                             disabled={cancelMutation.isPending}
-                            data-testid={`button-cancel-${order.id}`}
                           >
                             <X className="w-3 h-3 mr-1" />
                             Cancel

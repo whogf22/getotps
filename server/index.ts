@@ -1,6 +1,8 @@
+import "dotenv/config";
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
+import { startTronPoller } from "./tronPoller";
 import { createServer } from "http";
 
 const app = express();
@@ -98,6 +100,9 @@ app.use((req, res, next) => {
     },
     () => {
       log(`serving on port ${port}`);
+
+      // Start TronGrid USDT deposit poller
+      startTronPoller();
     },
   );
 })();

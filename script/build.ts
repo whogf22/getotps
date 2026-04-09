@@ -22,7 +22,7 @@ const allowlist = [
   "openai",
   "passport",
   "passport-local",
-  "stripe",
+  "better-sqlite3-session-store",
   "uuid",
   "ws",
   "xlsx",
