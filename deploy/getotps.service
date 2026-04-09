@@ -1,0 +1,28 @@
+[Unit]
+Description=GetOTPs SMS Verification Service
+After=network.target
+
+[Service]
+Type=simple
+User=getotps
+Group=getotps
+WorkingDirectory=/opt/getotps
+EnvironmentFile=/opt/getotps/.env
+ExecStart=/usr/bin/node dist/index.cjs
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/getotps
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=getotps
+
+[Install]
+WantedBy=multi-user.target
