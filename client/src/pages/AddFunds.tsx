@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { useAuth } from "@/contexts/AuthContext";
@@ -122,6 +122,19 @@ export default function AddFunds() {
     queryKey: ["/api/crypto/deposits"],
     refetchInterval: 5000, // Poll frequently so auto-confirmed deposits update quickly
   });
+
+  // Sync activeDeposit state with backend polling data
+  useEffect(() => {
+    if (!activeDeposit || !deposits) return;
+    const updated = deposits.find((d: any) => d.id === activeDeposit.id);
+    if (updated && updated.status !== activeDeposit.status) {
+      setActiveDeposit(updated);
+      if (updated.status === "completed") {
+        refreshUser();
+        queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
+      }
+    }
+  }, [deposits, activeDeposit]);
 
   const { data: transactions } = useQuery<any[]>({
     queryKey: ["/api/transactions"],

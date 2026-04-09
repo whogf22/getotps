@@ -27,8 +27,8 @@ export default function Register() {
       toast({ title: "Error", description: "Please fill in all fields", variant: "destructive" });
       return;
     }
-    if (password.length < 6) {
-      toast({ title: "Error", description: "Password must be at least 6 characters", variant: "destructive" });
+    if (password.length < 8) {
+      toast({ title: "Error", description: "Password must be at least 8 characters", variant: "destructive" });
       return;
     }
     setLoading(true);
@@ -94,7 +94,7 @@ export default function Register() {
                   <Input
                     id="password"
                     type={showPassword ? "text" : "password"}
-                    placeholder="Min. 6 characters"
+                    placeholder="Min. 8 characters"
                     value={password}
                     onChange={e => setPassword(e.target.value)}
                     autoComplete="new-password"

@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
-import { storage, sqliteClient } from "./storage";
+import { storage, sqliteClient, runTransaction, syncDb } from "./storage";
 import session from "express-session";
 import passport from "passport";
 import { Strategy as LocalStrategy } from "passport-local";
@@ -13,6 +13,14 @@ declare module "express-session" {
   interface SessionData {
     userId?: number;
   }
+}
+
+// Safe error response — hide internals in production
+function safeError(err: any): string {
+  if (process.env.NODE_ENV === "production") {
+    return "Something went wrong. Please try again.";
+  }
+  return err?.message || "Unknown error";
 }
 
 // ========== TELLABOT API INTEGRATION ==========
@@ -129,6 +137,9 @@ export async function registerRoutes(
   const isProduction = process.env.NODE_ENV === "production";
 
   if (!process.env.SESSION_SECRET) {
+    if (isProduction) {
+      throw new Error("FATAL: SESSION_SECRET must be set in production. Refusing to start with insecure default.");
+    }
     console.warn("WARNING: SESSION_SECRET not set. Using insecure default. Set it in .env for production!");
   }
 
@@ -241,13 +252,13 @@ export async function registerRoutes(
         res.json(safeUser);
       });
     } catch (err: any) {
-      res.status(500).json({ message: err.message });
+      res.status(500).json({ message: safeError(err) });
     }
   });
 
   app.post("/api/auth/login", authLimiter, (req, res, next) => {
     passport.authenticate("local", (err: any, user: any, info: any) => {
-      if (err) return res.status(500).json({ message: err.message });
+      if (err) return res.status(500).json({ message: safeError(err) });
       if (!user) return res.status(401).json({ message: info?.message || "Invalid credentials" });
       req.login(user, (loginErr) => {
         if (loginErr) return res.status(500).json({ message: "Login failed" });
@@ -341,43 +352,53 @@ export async function registerRoutes(
       // Format phone number
       const phoneNumber = mdn.startsWith("+") ? mdn : `+${mdn}`;
 
-      // Deduct balance
-      const newBalance = (balance - price).toFixed(2);
-      await storage.updateUserBalance(user.id, newBalance);
-
+      // Atomic: deduct balance + create order + create transaction
       const now = new Date();
       const expiresAt = new Date(now.getTime() + 20 * 60 * 1000);
 
-      const order = await storage.createOrder({
-        userId: user.id,
-        serviceId: service.id,
-        serviceName: service.name,
-        phoneNumber,
-        status: "waiting",
-        otpCode: null,
-        smsMessages: null,
-        price: service.price,
-        tellabotRequestId,
-        tellabotMdn: mdn,
-        createdAt: now.toISOString(),
-        expiresAt: expiresAt.toISOString(),
-        completedAt: null,
-      });
+      const order = runTransaction(() => {
+        // Re-read balance inside transaction to prevent race conditions
+        const txUser = syncDb.getUser(user.id);
+        if (!txUser) throw new Error("User not found");
+        const txBalance = parseFloat(txUser.balance);
+        if (txBalance < price) throw new Error("Insufficient balance");
 
-      await storage.createTransaction({
-        userId: user.id,
-        type: "purchase",
-        amount: `-${service.price}`,
-        description: `${service.name} number rental`,
-        orderId: order.id,
-        paymentRef: null,
-        createdAt: now.toISOString(),
+        const newBalance = (txBalance - price).toFixed(2);
+        syncDb.updateUserBalance(user.id, newBalance);
+
+        const ord = syncDb.createOrder({
+          userId: user.id,
+          serviceId: service.id,
+          serviceName: service.name,
+          phoneNumber,
+          status: "waiting",
+          otpCode: null,
+          smsMessages: null,
+          price: service.price,
+          tellabotRequestId,
+          tellabotMdn: mdn,
+          createdAt: now.toISOString(),
+          expiresAt: expiresAt.toISOString(),
+          completedAt: null,
+        });
+
+        syncDb.createTransaction({
+          userId: user.id,
+          type: "purchase",
+          amount: `-${service.price}`,
+          description: `${service.name} number rental`,
+          orderId: ord.id,
+          paymentRef: null,
+          createdAt: now.toISOString(),
+        });
+
+        return ord;
       });
 
       res.json({ ...order, service });
     } catch (err: any) {
       console.error("Order error:", err);
-      res.status(500).json({ message: err.message });
+      res.status(500).json({ message: safeError(err) });
     }
   });
 
@@ -447,7 +468,7 @@ export async function registerRoutes(
       res.json({ status: "waiting", messages: [], otpCode: null });
     } catch (err: any) {
       console.error("Check SMS error:", err);
-      res.status(500).json({ message: err.message });
+      res.status(500).json({ message: safeError(err) });
     }
   });
 
@@ -469,7 +490,7 @@ export async function registerRoutes(
 
       res.json({ otpCode, message: "SMS simulated", messages: fakeMessage });
     } catch (err: any) {
-      res.status(500).json({ message: err.message });
+      res.status(500).json({ message: safeError(err) });
     }
   });
 
@@ -490,27 +511,28 @@ export async function registerRoutes(
         }
       }
 
-      await storage.cancelOrder(order.id);
-
-      // Refund balance
-      const freshUser = await storage.getUser(user.id);
-      if (freshUser) {
-        const newBalance = (parseFloat(freshUser.balance) + parseFloat(order.price)).toFixed(2);
-        await storage.updateUserBalance(user.id, newBalance);
-        await storage.createTransaction({
-          userId: user.id,
-          type: "refund",
-          amount: order.price,
-          description: "Order cancelled - refund",
-          orderId: order.id,
-          paymentRef: null,
-          createdAt: new Date().toISOString(),
-        });
-      }
+      // Atomic: cancel order + refund balance + create transaction
+      runTransaction(() => {
+        syncDb.cancelOrder(order.id);
+        const txUser = syncDb.getUser(user.id);
+        if (txUser) {
+          const newBalance = (parseFloat(txUser.balance) + parseFloat(order.price)).toFixed(2);
+          syncDb.updateUserBalance(user.id, newBalance);
+          syncDb.createTransaction({
+            userId: user.id,
+            type: "refund",
+            amount: order.price,
+            description: "Order cancelled - refund",
+            orderId: order.id,
+            paymentRef: null,
+            createdAt: new Date().toISOString(),
+          });
+        }
+      });
 
       res.json({ message: "Order cancelled and refunded" });
     } catch (err: any) {
-      res.status(500).json({ message: err.message });
+      res.status(500).json({ message: safeError(err) });
     }
   });
 
@@ -580,7 +602,7 @@ export async function registerRoutes(
         createdAt: now.toISOString(), expiresAt: expiresAt.toISOString(), completedAt: null,
       });
       res.json(deposit);
-    } catch (err: any) { res.status(500).json({ message: err.message }); }
+    } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
   });
 
   app.get("/api/crypto/deposits", requireAuth, async (req, res) => {
@@ -592,14 +614,16 @@ export async function registerRoutes(
     try {
       const user = req.user as any;
       const { txHash } = req.body;
-      if (!txHash) return res.status(400).json({ message: "Transaction hash is required" });
+      if (!txHash || typeof txHash !== "string") return res.status(400).json({ message: "Transaction hash is required" });
+      const trimmedHash = txHash.trim();
+      if (trimmedHash.length < 10 || trimmedHash.length > 128) return res.status(400).json({ message: "Invalid transaction hash format" });
       const deposit = await storage.getCryptoDeposit(Number(req.params.id));
       if (!deposit) return res.status(404).json({ message: "Deposit not found" });
       if (deposit.userId !== user.id) return res.status(403).json({ message: "Forbidden" });
       if (deposit.status !== "pending") return res.status(400).json({ message: "Deposit is not pending" });
-      await storage.updateCryptoDeposit(deposit.id, { txHash, status: "confirming" });
+      await storage.updateCryptoDeposit(deposit.id, { txHash: trimmedHash, status: "confirming" });
       res.json({ message: "Transaction hash submitted. Awaiting confirmation." });
-    } catch (err: any) { res.status(500).json({ message: err.message }); }
+    } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
   });
 
   app.post("/api/crypto/:id/simulate-confirm", requireAuth, async (req, res) => {
@@ -612,20 +636,23 @@ export async function registerRoutes(
       if (!deposit) return res.status(404).json({ message: "Deposit not found" });
       if (deposit.userId !== user.id) return res.status(403).json({ message: "Forbidden" });
       if (deposit.status !== "confirming") return res.status(400).json({ message: "Deposit must be in confirming state" });
+      // Atomic: complete deposit + credit balance + create transaction
       const now = new Date().toISOString();
-      await storage.updateCryptoDeposit(deposit.id, { status: "completed", completedAt: now });
-      const freshUser = await storage.getUser(user.id);
-      if (freshUser) {
-        const newBalance = (parseFloat(freshUser.balance) + parseFloat(deposit.amount)).toFixed(2);
-        await storage.updateUserBalance(user.id, newBalance);
-        await storage.createTransaction({
+      const newBalance = runTransaction(() => {
+        syncDb.updateCryptoDeposit(deposit.id, { status: "completed", completedAt: now } as any);
+        const txUser = syncDb.getUser(user.id);
+        if (!txUser) throw new Error("User not found");
+        const bal = (parseFloat(txUser.balance) + parseFloat(deposit.amount)).toFixed(2);
+        syncDb.updateUserBalance(user.id, bal);
+        syncDb.createTransaction({
           userId: user.id, type: "deposit", amount: deposit.amount,
           description: `Crypto deposit (${deposit.currency}) confirmed`,
           orderId: null, paymentRef: null, createdAt: now,
         });
-      }
-      res.json({ message: "Deposit confirmed", newBalance: (parseFloat(freshUser!.balance) + parseFloat(deposit.amount)).toFixed(2) });
-    } catch (err: any) { res.status(500).json({ message: err.message }); }
+        return bal;
+      });
+      res.json({ message: "Deposit confirmed", newBalance });
+    } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
   });
 
   app.post("/api/admin/crypto/:id/confirm", requireAdmin, async (req, res) => {
@@ -633,20 +660,22 @@ export async function registerRoutes(
       const deposit = await storage.getCryptoDeposit(Number(req.params.id));
       if (!deposit) return res.status(404).json({ message: "Deposit not found" });
       if (deposit.status === "completed") return res.status(400).json({ message: "Already completed" });
+      // Atomic: complete deposit + credit balance + create transaction
       const now = new Date().toISOString();
-      await storage.updateCryptoDeposit(deposit.id, { status: "completed", completedAt: now });
-      const freshUser = await storage.getUser(deposit.userId);
-      if (freshUser) {
-        const newBalance = (parseFloat(freshUser.balance) + parseFloat(deposit.amount)).toFixed(2);
-        await storage.updateUserBalance(deposit.userId, newBalance);
-        await storage.createTransaction({
+      runTransaction(() => {
+        syncDb.updateCryptoDeposit(deposit.id, { status: "completed", completedAt: now } as any);
+        const txUser = syncDb.getUser(deposit.userId);
+        if (!txUser) throw new Error("User not found");
+        const newBalance = (parseFloat(txUser.balance) + parseFloat(deposit.amount)).toFixed(2);
+        syncDb.updateUserBalance(deposit.userId, newBalance);
+        syncDb.createTransaction({
           userId: deposit.userId, type: "deposit", amount: deposit.amount,
           description: `Crypto deposit (${deposit.currency}) confirmed by admin`,
           orderId: null, paymentRef: null, createdAt: now,
         });
-      }
+      });
       res.json({ message: "Deposit confirmed and balance credited" });
-    } catch (err: any) { res.status(500).json({ message: err.message }); }
+    } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
   });
 
   app.get("/api/admin/crypto/pending", requireAdmin, async (_req, res) => {
@@ -666,7 +695,7 @@ export async function registerRoutes(
 
   app.get("/api/admin/users", requireAdmin, async (_req, res) => {
     const allUsers = await storage.getAllUsers();
-    res.json(allUsers.map(({ password: _, ...u }) => u));
+    res.json(allUsers.map(({ password: _, apiKey: __, ...u }) => u));
   });
 
   app.get("/api/admin/stats", requireAdmin, async (_req, res) => {
@@ -704,9 +733,20 @@ export async function registerRoutes(
 
   app.put("/api/admin/services/:id", requireAdmin, async (req, res) => {
     try {
-      await storage.updateService(Number(req.params.id), req.body);
+      const { price, isActive } = req.body;
+      const update: Record<string, any> = {};
+      if (price !== undefined) {
+        const p = parseFloat(price);
+        if (isNaN(p) || p < 0) return res.status(400).json({ message: "Invalid price" });
+        update.price = p.toFixed(2);
+      }
+      if (isActive !== undefined) {
+        update.isActive = isActive ? 1 : 0;
+      }
+      if (Object.keys(update).length === 0) return res.status(400).json({ message: "No valid fields to update" });
+      await storage.updateService(Number(req.params.id), update);
       res.json({ message: "Service updated" });
-    } catch (err: any) { res.status(500).json({ message: err.message }); }
+    } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
   });
 
   // ========== API v1 (API key auth) ==========
@@ -755,27 +795,37 @@ export async function registerRoutes(
       const tbData = tbResult.message[0];
       const phoneNumber = tbData.mdn.startsWith("+") ? tbData.mdn : `+${tbData.mdn}`;
 
-      const newBalance = (balance - price).toFixed(2);
-      await storage.updateUserBalance(user.id, newBalance);
-
+      // Atomic: deduct balance + create order + create transaction
       const now = new Date();
       const expiresAt = new Date(now.getTime() + 20 * 60 * 1000);
 
-      const order = await storage.createOrder({
-        userId: user.id, serviceId: svc.id, serviceName: svc.name,
-        phoneNumber, status: "waiting", otpCode: null, smsMessages: null,
-        price: svc.price, tellabotRequestId: tbData.id, tellabotMdn: tbData.mdn,
-        createdAt: now.toISOString(), expiresAt: expiresAt.toISOString(), completedAt: null,
-      });
+      const order = runTransaction(() => {
+        const txUser = syncDb.getUser(user.id);
+        if (!txUser) throw new Error("User not found");
+        const txBalance = parseFloat(txUser.balance);
+        if (txBalance < price) throw new Error("Insufficient balance");
 
-      await storage.createTransaction({
-        userId: user.id, type: "purchase", amount: `-${svc.price}`,
-        description: `${svc.name} number rental`, orderId: order.id,
-        paymentRef: null, createdAt: now.toISOString(),
+        const newBalance = (txBalance - price).toFixed(2);
+        syncDb.updateUserBalance(user.id, newBalance);
+
+        const ord = syncDb.createOrder({
+          userId: user.id, serviceId: svc.id, serviceName: svc.name,
+          phoneNumber, status: "waiting", otpCode: null, smsMessages: null,
+          price: svc.price, tellabotRequestId: tbData.id, tellabotMdn: tbData.mdn,
+          createdAt: now.toISOString(), expiresAt: expiresAt.toISOString(), completedAt: null,
+        });
+
+        syncDb.createTransaction({
+          userId: user.id, type: "purchase", amount: `-${svc.price}`,
+          description: `${svc.name} number rental`, orderId: ord.id,
+          paymentRef: null, createdAt: now.toISOString(),
+        });
+
+        return ord;
       });
 
       res.json({ orderId: order.id, phoneNumber, status: "waiting", expiresAt: order.expiresAt });
-    } catch (err: any) { res.status(500).json({ error: err.message }); }
+    } catch (err: any) { res.status(500).json({ error: safeError(err) }); }
   });
 
   app.get("/api/v1/order/:id", requireApiKey, async (req, res) => {
@@ -833,7 +883,7 @@ export async function registerRoutes(
         await storage.updateUserBalance(user.id, newBalance);
       }
       res.json({ message: "Order cancelled and refunded" });
-    } catch (err: any) { res.status(500).json({ error: err.message }); }
+    } catch (err: any) { res.status(500).json({ error: safeError(err) }); }
   });
 
   // Profile
@@ -853,7 +903,7 @@ export async function registerRoutes(
       const hashed = await bcrypt.hash(newPassword, 10);
       await storage.updateUserPassword(user.id, hashed);
       res.json({ message: "Password updated" });
-    } catch (err: any) { res.status(500).json({ message: err.message }); }
+    } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
   });
 
   // Initial service sync on startup

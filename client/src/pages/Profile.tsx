@@ -61,8 +61,8 @@ export default function Profile() {
     if (newPassword !== confirmPassword) {
       return toast({ title: "Passwords don't match", variant: "destructive" });
     }
-    if (newPassword.length < 6) {
-      return toast({ title: "Password must be at least 6 characters", variant: "destructive" });
+    if (newPassword.length < 8) {
+      return toast({ title: "Password must be at least 8 characters", variant: "destructive" });
     }
     changePasswordMutation.mutate();
   };
@@ -173,7 +173,7 @@ export default function Profile() {
                   value={newPassword}
                   onChange={e => setNewPassword(e.target.value)}
                   className="h-9 pr-10 text-sm"
-                  placeholder="Min. 6 characters"
+                  placeholder="Min. 8 characters"
                 />
                 <button type="button" className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" onClick={() => setShowNewPw(!showNewPw)}>
                   {showNewPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}

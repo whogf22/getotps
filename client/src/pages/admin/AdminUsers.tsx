@@ -172,12 +172,6 @@ export default function AdminUsers() {
                   <p className="text-xs text-muted-foreground mb-0.5">Email</p>
                   <p>{selectedUser.email}</p>
                 </div>
-                <div className="col-span-2">
-                  <p className="text-xs text-muted-foreground mb-0.5">API Key</p>
-                  <p className="font-mono text-xs break-all bg-muted p-2 rounded">
-                    {selectedUser.apiKey || "None"}
-                  </p>
-                </div>
               </div>
             </div>
           )}

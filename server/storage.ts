@@ -10,8 +10,40 @@ sqlite.pragma("journal_mode = WAL");
 
 export const db = drizzle(sqlite);
 
-// Export raw sqlite instance for session store
+// Export raw sqlite instance for session store and transactions
 export { sqlite as sqliteClient };
+
+// Atomic transaction helper — all operations inside fn succeed or all roll back
+// Note: better-sqlite3 is synchronous, so all Drizzle operations inside are sync
+export function runTransaction<T>(fn: () => T): T {
+  const txn = sqlite.transaction(fn);
+  return txn();
+}
+
+// Synchronous DB helpers for use inside transactions (no async wrappers)
+export const syncDb = {
+  getUser(id: number): User | undefined {
+    return db.select().from(users).where(eq(users.id, id)).get();
+  },
+  updateUserBalance(userId: number, balance: string): void {
+    db.update(users).set({ balance }).where(eq(users.id, userId)).run();
+  },
+  createOrder(data: InsertOrder): Order {
+    return db.insert(orders).values(data).returning().get();
+  },
+  createTransaction(data: InsertTransaction): Transaction {
+    return db.insert(transactions).values(data).returning().get();
+  },
+  cancelOrder(id: number): void {
+    db.update(orders).set({ status: "cancelled", completedAt: new Date().toISOString() }).where(eq(orders.id, id)).run();
+  },
+  getCryptoDeposit(id: number): CryptoDeposit | undefined {
+    return db.select().from(cryptoDeposits).where(eq(cryptoDeposits.id, id)).get();
+  },
+  updateCryptoDeposit(id: number, data: Partial<CryptoDeposit>): void {
+    db.update(cryptoDeposits).set(data as any).where(eq(cryptoDeposits.id, id)).run();
+  },
+};
 
 // Create tables if they don't exist
 sqlite.exec(`
@@ -85,6 +117,14 @@ sqlite.exec(`
     last_timestamp INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT ''
   );
+
+  -- Performance indexes
+  CREATE INDEX IF NOT EXISTS idx_orders_user_status ON orders(user_id, status);
+  CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id);
+  CREATE INDEX IF NOT EXISTS idx_crypto_deposits_user ON crypto_deposits(user_id);
+  CREATE INDEX IF NOT EXISTS idx_crypto_deposits_status ON crypto_deposits(status);
+  CREATE INDEX IF NOT EXISTS idx_crypto_deposits_unique_amount ON crypto_deposits(unique_amount, status);
+  CREATE INDEX IF NOT EXISTS idx_crypto_deposits_trongrid_tx ON crypto_deposits(trongrid_tx_id);
 `);
 
 // Migrate: rename stripe_session_id -> payment_ref for existing databases

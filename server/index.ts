@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express, { type Request, Response, NextFunction } from "express";
+import helmet from "helmet";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { startTronPoller } from "./tronPoller";
@@ -13,6 +14,10 @@ declare module "http" {
     rawBody: unknown;
   }
 }
+
+app.use(helmet({
+  contentSecurityPolicy: false, // SPA serves its own assets
+}));
 
 app.use(
   express.json({
@@ -66,7 +71,9 @@ app.use((req, res, next) => {
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
+    const message = process.env.NODE_ENV === "production"
+      ? "Internal Server Error"
+      : (err.message || "Internal Server Error");
 
     console.error("Internal Server Error:", err);
 
