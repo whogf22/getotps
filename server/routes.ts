@@ -54,6 +54,11 @@ function safeError(err: any): string {
 // RFC 5322-compliant email regex with bounded quantifiers to prevent ReDoS
 const EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
 
+// Business constants
+const MAX_USER_AGENT_LENGTH = 256;
+const ORDER_EXPIRATION_MS = 20 * 60 * 1000; // 20 minutes
+const MAX_DEPOSIT_USD = 10000;
+
 // Request ID generator
 function getRequestId(req: Request): string {
   return (req.headers["x-request-id"] as string) || crypto.randomUUID();
@@ -89,7 +94,7 @@ function auditLog(req: Request, action: string, opts: {
       userId,
       actorRole: user?.role ?? null,
       ip: getClientIp(req),
-      userAgent: (req.headers["user-agent"] || "").slice(0, 256),
+      userAgent: (req.headers["user-agent"] || "").slice(0, MAX_USER_AGENT_LENGTH),
       action,
       targetType: opts.targetType ?? null,
       targetId: opts.targetId != null ? String(opts.targetId) : null,
@@ -571,7 +576,7 @@ export async function registerRoutes(
 
       // Atomic: deduct balance + create order + create transaction (ledger entry)
       const now = new Date();
-      const expiresAt = new Date(now.getTime() + 20 * 60 * 1000);
+      const expiresAt = new Date(now.getTime() + ORDER_EXPIRATION_MS);
       const idempotencyKey = (req.headers["idempotency-key"] as string) || null;
 
       const order = runTransaction(() => {
@@ -830,7 +835,7 @@ export async function registerRoutes(
       if (!currency || !amount) return res.status(400).json({ message: "Currency and amount are required" });
       const usdAmount = parseFloat(amount);
       if (isNaN(usdAmount) || usdAmount < 1) return res.status(400).json({ message: "Minimum deposit is $1.00" });
-      if (usdAmount > 10000) return res.status(400).json({ message: "Maximum deposit is $10,000.00" });
+      if (usdAmount > MAX_DEPOSIT_USD) return res.status(400).json({ message: `Maximum deposit is $${MAX_DEPOSIT_USD.toLocaleString()}.00` });
       const walletAddress = CRYPTO_WALLETS[currency];
       if (!walletAddress) return res.status(400).json({ message: "Unsupported currency" });
       const rate = CRYPTO_RATES[currency];
@@ -1098,7 +1103,7 @@ export async function registerRoutes(
 
       // Atomic: deduct balance + create order + create ledger entry
       const now = new Date();
-      const expiresAt = new Date(now.getTime() + 20 * 60 * 1000);
+      const expiresAt = new Date(now.getTime() + ORDER_EXPIRATION_MS);
 
       const order = runTransaction(() => {
         const txUser = syncDb.getUser(user.id);
