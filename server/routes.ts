@@ -241,7 +241,7 @@ export async function registerRoutes(
       if (typeof username !== "string" || username.length < 2 || username.length > 50) {
         return res.status(400).json({ message: "Username must be 2-50 characters" });
       }
-      if (typeof email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      if (typeof email !== "string" || email.length > 254 || !/^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/.test(email)) {
         return res.status(400).json({ message: "Invalid email format" });
       }
       if (typeof password !== "string" || password.length < 8 || password.length > 128) {
@@ -889,19 +889,18 @@ export async function registerRoutes(
       runTransaction(() => {
         syncDb.cancelOrder(order.id);
         const txUser = syncDb.getUser(user.id);
-        if (txUser) {
-          const newBalance = (parseFloat(txUser.balance) + parseFloat(order.price)).toFixed(2);
-          syncDb.updateUserBalance(user.id, newBalance);
-          syncDb.createTransaction({
-            userId: user.id,
-            type: "refund",
-            amount: order.price,
-            description: "Order cancelled - refund",
-            orderId: order.id,
-            paymentRef: null,
-            createdAt: new Date().toISOString(),
-          });
-        }
+        if (!txUser) throw new Error("User not found");
+        const newBalance = (parseFloat(txUser.balance) + parseFloat(order.price)).toFixed(2);
+        syncDb.updateUserBalance(user.id, newBalance);
+        syncDb.createTransaction({
+          userId: user.id,
+          type: "refund",
+          amount: order.price,
+          description: "Order cancelled - refund",
+          orderId: order.id,
+          paymentRef: null,
+          createdAt: new Date().toISOString(),
+        });
       });
       res.json({ message: "Order cancelled and refunded" });
     } catch (err: any) { res.status(500).json({ error: safeError(err) }); }
