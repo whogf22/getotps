@@ -23,6 +23,9 @@ function safeError(err: any): string {
   return err?.message || "Unknown error";
 }
 
+// RFC 5322-compliant email regex with bounded quantifiers to prevent ReDoS
+const EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
+
 // ========== TELLABOT API INTEGRATION ==========
 const TELLABOT_BASE = "https://www.tellabot.com/api_command.php";
 const TELLABOT_USER = process.env.TELLABOT_USER!;
@@ -241,7 +244,7 @@ export async function registerRoutes(
       if (typeof username !== "string" || username.length < 2 || username.length > 50) {
         return res.status(400).json({ message: "Username must be 2-50 characters" });
       }
-      if (typeof email !== "string" || email.length > 254 || !/^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/.test(email)) {
+      if (typeof email !== "string" || email.length > 254 || !EMAIL_REGEX.test(email)) {
         return res.status(400).json({ message: "Invalid email format" });
       }
       if (typeof password !== "string" || password.length < 8 || password.length > 128) {
@@ -889,7 +892,7 @@ export async function registerRoutes(
       runTransaction(() => {
         syncDb.cancelOrder(order.id);
         const txUser = syncDb.getUser(user.id);
-        if (!txUser) throw new Error("User not found");
+        if (!txUser) throw new Error("User not found during refund transaction");
         const newBalance = (parseFloat(txUser.balance) + parseFloat(order.price)).toFixed(2);
         syncDb.updateUserBalance(user.id, newBalance);
         syncDb.createTransaction({
