@@ -238,6 +238,15 @@ export async function registerRoutes(
       if (!username || !email || !password) {
         return res.status(400).json({ message: "All fields required" });
       }
+      if (typeof username !== "string" || username.length < 2 || username.length > 50) {
+        return res.status(400).json({ message: "Username must be 2-50 characters" });
+      }
+      if (typeof email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ message: "Invalid email format" });
+      }
+      if (typeof password !== "string" || password.length < 8 || password.length > 128) {
+        return res.status(400).json({ message: "Password must be 8-128 characters" });
+      }
       const existing = await storage.getUserByEmail(email);
       if (existing) return res.status(400).json({ message: "Email already registered" });
       const existingUsername = await storage.getUserByUsername(username);
@@ -876,12 +885,24 @@ export async function registerRoutes(
         try { await tellabotAPI("reject", { id: order.tellabotRequestId }); } catch (e) {}
       }
 
-      await storage.cancelOrder(order.id);
-      const freshUser = await storage.getUser(user.id);
-      if (freshUser) {
-        const newBalance = (parseFloat(freshUser.balance) + parseFloat(order.price)).toFixed(2);
-        await storage.updateUserBalance(user.id, newBalance);
-      }
+      // Atomic: cancel order + refund balance + create transaction
+      runTransaction(() => {
+        syncDb.cancelOrder(order.id);
+        const txUser = syncDb.getUser(user.id);
+        if (txUser) {
+          const newBalance = (parseFloat(txUser.balance) + parseFloat(order.price)).toFixed(2);
+          syncDb.updateUserBalance(user.id, newBalance);
+          syncDb.createTransaction({
+            userId: user.id,
+            type: "refund",
+            amount: order.price,
+            description: "Order cancelled - refund",
+            orderId: order.id,
+            paymentRef: null,
+            createdAt: new Date().toISOString(),
+          });
+        }
+      });
       res.json({ message: "Order cancelled and refunded" });
     } catch (err: any) { res.status(500).json({ error: safeError(err) }); }
   });
@@ -896,6 +917,10 @@ export async function registerRoutes(
     try {
       const user = req.user as any;
       const { currentPassword, newPassword } = req.body;
+      if (!currentPassword || !newPassword) return res.status(400).json({ message: "Current and new passwords are required" });
+      if (typeof newPassword !== "string" || newPassword.length < 8 || newPassword.length > 128) {
+        return res.status(400).json({ message: "New password must be 8-128 characters" });
+      }
       const freshUser = await storage.getUser(user.id);
       if (!freshUser) return res.status(404).json({ message: "User not found" });
       const isValid = await bcrypt.compare(currentPassword, freshUser.password);
