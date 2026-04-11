@@ -1,4 +1,4 @@
-import type { Express, Request, Response } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage, sqliteClient, runTransaction, syncDb } from "./storage";
 import session from "express-session";
@@ -7,6 +7,7 @@ import { Strategy as LocalStrategy } from "passport-local";
 import bcrypt from "bcryptjs";
 import rateLimit from "express-rate-limit";
 import BetterSqlite3SessionStore from "better-sqlite3-session-store";
+import crypto from "crypto";
 
 // Extend session type
 declare module "express-session" {
@@ -15,9 +16,36 @@ declare module "express-session" {
   }
 }
 
+// ========== ENV VALIDATION ==========
+const isProduction = process.env.NODE_ENV === "production";
+
+function validateEnv(): void {
+  if (isProduction) {
+    const required = ["SESSION_SECRET", "ADMIN_PASSWORD"];
+    const missing = required.filter(k => !process.env[k]);
+    if (missing.length > 0) {
+      throw new Error(`FATAL: Missing required env vars in production: ${missing.join(", ")}`);
+    }
+    if (process.env.SESSION_SECRET && process.env.SESSION_SECRET.length < 32) {
+      throw new Error("FATAL: SESSION_SECRET must be at least 32 characters in production");
+    }
+    if (process.env.ADMIN_PASSWORD === "admin123" || process.env.ADMIN_PASSWORD === "password") {
+      throw new Error("FATAL: ADMIN_PASSWORD must be changed from default in production");
+    }
+  } else {
+    if (!process.env.SESSION_SECRET) {
+      console.warn("WARNING: SESSION_SECRET not set. Using insecure default. Set it in .env for production!");
+    }
+  }
+}
+
+validateEnv();
+
+// ========== HELPERS ==========
+
 // Safe error response — hide internals in production
 function safeError(err: any): string {
-  if (process.env.NODE_ENV === "production") {
+  if (isProduction) {
     return "Something went wrong. Please try again.";
   }
   return err?.message || "Unknown error";
@@ -25,6 +53,127 @@ function safeError(err: any): string {
 
 // RFC 5322-compliant email regex with bounded quantifiers to prevent ReDoS
 const EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
+
+// Request ID generator
+function getRequestId(req: Request): string {
+  return (req.headers["x-request-id"] as string) || crypto.randomUUID();
+}
+
+// Get client IP respecting trust proxy
+function getClientIp(req: Request): string {
+  return (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip || "unknown";
+}
+
+// Mask sensitive data for audit logs
+function maskSensitive(data: Record<string, any>): Record<string, any> {
+  const masked = { ...data };
+  for (const key of ["password", "currentPassword", "newPassword", "api_key", "apiKey", "txHash"]) {
+    if (masked[key]) masked[key] = "***";
+  }
+  return masked;
+}
+
+// Audit log helper
+function auditLog(req: Request, action: string, opts: {
+  targetType?: string;
+  targetId?: string | number;
+  amount?: string;
+  status?: string;
+  metadata?: Record<string, any>;
+  userId?: number;
+} = {}): void {
+  try {
+    const user = (req.user as any) || (req as any).apiUser;
+    const userId = opts.userId ?? user?.id ?? null;
+    storage.createAuditLog({
+      userId,
+      actorRole: user?.role ?? null,
+      ip: getClientIp(req),
+      userAgent: (req.headers["user-agent"] || "").slice(0, 256),
+      action,
+      targetType: opts.targetType ?? null,
+      targetId: opts.targetId != null ? String(opts.targetId) : null,
+      amount: opts.amount ?? null,
+      status: opts.status ?? null,
+      requestId: getRequestId(req),
+      idempotencyKey: (req.headers["idempotency-key"] as string) ?? null,
+      metadata: opts.metadata ? JSON.stringify(maskSensitive(opts.metadata)) : null,
+    });
+  } catch (err) {
+    console.error("Audit log write failed:", err);
+  }
+}
+
+// ========== IDEMPOTENCY MIDDLEWARE ==========
+function idempotencyGuard(routeKey: string) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const idempotencyKey = req.headers["idempotency-key"] as string;
+    if (!idempotencyKey) {
+      return next(); // No key = no idempotency enforcement
+    }
+
+    if (typeof idempotencyKey !== "string" || idempotencyKey.length < 8 || idempotencyKey.length > 128) {
+      return res.status(400).json({ message: "Idempotency-Key must be 8-128 characters" });
+    }
+
+    const user = (req.user as any) || (req as any).apiUser;
+    const userId = user?.id;
+    if (!userId) {
+      return next(); // Can't enforce without user context
+    }
+
+    const existing = storage.getIdempotencyKey(idempotencyKey, userId, routeKey);
+
+    if (existing) {
+      // Already exists — check status
+      if (existing.status === "processing") {
+        return res.status(409).json({ message: "Request is currently being processed. Please wait." });
+      }
+      // Return cached response
+      if (existing.responseBody) {
+        try {
+          const cachedResponse = JSON.parse(existing.responseBody);
+          return res.status(existing.statusCode || 200).json(cachedResponse);
+        } catch {
+          return res.status(existing.statusCode || 200).json({ message: "Duplicate request" });
+        }
+      }
+      return res.status(existing.statusCode || 200).json({ message: "Duplicate request" });
+    }
+
+    // Create idempotency record
+    let record;
+    try {
+      record = storage.createIdempotencyKey({
+        key: idempotencyKey,
+        userId,
+        route: routeKey,
+        method: req.method,
+      });
+    } catch (err: any) {
+      // Unique constraint violation = race condition
+      if (err?.code === "SQLITE_CONSTRAINT_UNIQUE" || err?.message?.includes("UNIQUE")) {
+        return res.status(409).json({ message: "Request is currently being processed. Please wait." });
+      }
+      throw err;
+    }
+
+    // Intercept response to capture it
+    const originalJson = res.json.bind(res);
+    res.json = function (body: any) {
+      const statusCode = res.statusCode;
+      const status = statusCode >= 200 && statusCode < 300 ? "success" : "failed";
+      try {
+        storage.completeIdempotencyKey(record.id, statusCode, JSON.stringify(body), status);
+      } catch (err) {
+        console.error("Failed to complete idempotency key:", err);
+      }
+      return originalJson(body);
+    };
+
+    next();
+  };
+}
 
 // ========== TELLABOT API INTEGRATION ==========
 const TELLABOT_BASE = "https://www.tellabot.com/api_command.php";
@@ -129,22 +278,27 @@ const CRYPTO_RATES: Record<string, number> = {
   LTC: parseFloat(process.env.CRYPTO_RATE_LTC || "92.50"),
 };
 
+// Valid order state transitions
+const VALID_ORDER_TRANSITIONS: Record<string, string[]> = {
+  waiting: ["received", "cancelled", "expired"],
+  received: ["completed"],
+  completed: [],
+  cancelled: [],
+  expired: [],
+};
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
 
+  // Trust proxy for Nginx reverse proxy
+  if (isProduction) {
+    app.set("trust proxy", 1);
+  }
+
   // Session setup with SQLite-backed store
   const SqliteStore = BetterSqlite3SessionStore(session);
-
-  const isProduction = process.env.NODE_ENV === "production";
-
-  if (!process.env.SESSION_SECRET) {
-    if (isProduction) {
-      throw new Error("FATAL: SESSION_SECRET must be set in production. Refusing to start with insecure default.");
-    }
-    console.warn("WARNING: SESSION_SECRET not set. Using insecure default. Set it in .env for production!");
-  }
 
   app.use(
     session({
@@ -155,6 +309,7 @@ export async function registerRoutes(
       secret: process.env.SESSION_SECRET || "getotps-dev-insecure-fallback",
       resave: false,
       saveUninitialized: false,
+      name: "getotps.sid",
       cookie: {
         secure: isProduction,
         httpOnly: true,
@@ -230,6 +385,33 @@ export async function registerRoutes(
     message: { message: "Too many order requests. Please slow down." },
   });
 
+  // Financial operations limiter (cancel, refund, crypto, deposit)
+  const financialLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000,
+    max: 15,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message: "Too many financial requests. Please slow down." },
+  });
+
+  // Password change limiter
+  const passwordLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message: "Too many password change attempts. Please try again later." },
+  });
+
+  // Admin actions limiter
+  const adminLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000,
+    max: 30,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message: "Too many admin requests. Please slow down." },
+  });
+
   // Apply general API limiter to all /api routes
   app.use("/api", apiLimiter);
 
@@ -260,28 +442,50 @@ export async function registerRoutes(
 
       req.login(user, (err) => {
         if (err) return res.status(500).json({ message: "Login failed after registration" });
+        auditLog(req, "register", { targetType: "user", targetId: user.id, status: "success" });
         const { password: _, ...safeUser } = user;
         res.json(safeUser);
       });
     } catch (err: any) {
+      auditLog(req, "register", { status: "failed", metadata: { error: safeError(err) } });
       res.status(500).json({ message: safeError(err) });
     }
   });
 
   app.post("/api/auth/login", authLimiter, (req, res, next) => {
     passport.authenticate("local", (err: any, user: any, info: any) => {
-      if (err) return res.status(500).json({ message: safeError(err) });
-      if (!user) return res.status(401).json({ message: info?.message || "Invalid credentials" });
-      req.login(user, (loginErr) => {
-        if (loginErr) return res.status(500).json({ message: "Login failed" });
-        const { password: _, ...safeUser } = user;
-        res.json(safeUser);
+      if (err) {
+        auditLog(req, "login", { status: "error" });
+        return res.status(500).json({ message: safeError(err) });
+      }
+      if (!user) {
+        auditLog(req, "login", { status: "failed", metadata: { email: req.body?.email } });
+        return res.status(401).json({ message: info?.message || "Invalid credentials" });
+      }
+      // Session rotation on login to prevent session fixation
+      req.session.regenerate((regenErr) => {
+        if (regenErr) {
+          return res.status(500).json({ message: "Session error" });
+        }
+        req.login(user, (loginErr) => {
+          if (loginErr) return res.status(500).json({ message: "Login failed" });
+          auditLog(req, "login", { targetType: "user", targetId: user.id, status: "success", userId: user.id });
+          const { password: _, ...safeUser } = user;
+          res.json(safeUser);
+        });
       });
     })(req, res, next);
   });
 
   app.post("/api/auth/logout", (req, res) => {
-    req.logout(() => { res.json({ message: "Logged out" }); });
+    const userId = (req.user as any)?.id;
+    auditLog(req, "logout", { targetType: "user", targetId: userId, status: "success" });
+    req.logout(() => {
+      req.session.destroy(() => {
+        res.clearCookie("getotps.sid");
+        res.json({ message: "Logged out" });
+      });
+    });
   });
 
   app.get("/api/auth/me", requireAuth, async (req, res) => {
@@ -320,7 +524,7 @@ export async function registerRoutes(
 
   // ========== ORDERS (TellaBot-backed) ==========
 
-  app.post("/api/orders", requireAuth, orderLimiter, async (req, res) => {
+  app.post("/api/orders", requireAuth, orderLimiter, idempotencyGuard("POST:/api/orders"), async (req, res) => {
     try {
       const user = req.user as any;
       const { serviceId, serviceName } = req.body;
@@ -341,6 +545,7 @@ export async function registerRoutes(
 
       const balance = parseFloat(freshUser.balance);
       const price = parseFloat(service.price);
+      if (price <= 0) return res.status(400).json({ message: "Invalid service price" });
       if (balance < price) return res.status(400).json({ message: "Insufficient balance" });
 
       // Request real number from TellaBot
@@ -364,9 +569,10 @@ export async function registerRoutes(
       // Format phone number
       const phoneNumber = mdn.startsWith("+") ? mdn : `+${mdn}`;
 
-      // Atomic: deduct balance + create order + create transaction
+      // Atomic: deduct balance + create order + create transaction (ledger entry)
       const now = new Date();
       const expiresAt = new Date(now.getTime() + 20 * 60 * 1000);
+      const idempotencyKey = (req.headers["idempotency-key"] as string) || null;
 
       const order = runTransaction(() => {
         // Re-read balance inside transaction to prevent race conditions
@@ -401,15 +607,22 @@ export async function registerRoutes(
           description: `${service.name} number rental`,
           orderId: ord.id,
           paymentRef: null,
+          idempotencyKey,
           createdAt: now.toISOString(),
         });
 
         return ord;
       });
 
+      auditLog(req, "order.create", {
+        targetType: "order", targetId: order.id,
+        amount: `-${service.price}`, status: "success",
+      });
+
       res.json({ ...order, service });
     } catch (err: any) {
       console.error("Order error:", err);
+      auditLog(req, "order.create", { status: "failed", metadata: { error: safeError(err) } });
       res.status(500).json({ message: safeError(err) });
     }
   });
@@ -486,7 +699,7 @@ export async function registerRoutes(
 
   // Simulate-sms: development only (disabled in production)
   app.post("/api/orders/:id/simulate-sms", requireAuth, async (req, res) => {
-    if (process.env.NODE_ENV === "production") {
+    if (isProduction) {
       return res.status(403).json({ message: "Simulation endpoints are disabled in production" });
     }
     try {
@@ -506,13 +719,22 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/orders/:id/cancel", requireAuth, async (req, res) => {
+  app.post("/api/orders/:id/cancel", requireAuth, financialLimiter, idempotencyGuard("POST:/api/orders/cancel"), async (req, res) => {
     try {
       const user = req.user as any;
       const order = await storage.getOrder(Number(req.params.id));
       if (!order) return res.status(404).json({ message: "Order not found" });
       if (order.userId !== user.id) return res.status(403).json({ message: "Forbidden" });
-      if (order.status !== "waiting") return res.status(400).json({ message: "Cannot cancel this order" });
+
+      // Business logic guards: only "waiting" orders can be cancelled
+      if (order.status === "cancelled") return res.status(400).json({ message: "Order is already cancelled" });
+      if (order.status === "completed" || order.status === "received") {
+        return res.status(400).json({ message: "Cannot cancel a fulfilled order" });
+      }
+      if (order.status === "expired") return res.status(400).json({ message: "Order has expired" });
+      if (!VALID_ORDER_TRANSITIONS[order.status]?.includes("cancelled")) {
+        return res.status(400).json({ message: "Cannot cancel this order" });
+      }
 
       // Reject on TellaBot side
       if (order.tellabotRequestId) {
@@ -523,12 +745,22 @@ export async function registerRoutes(
         }
       }
 
-      // Atomic: cancel order + refund balance + create transaction
+      const idempotencyKey = (req.headers["idempotency-key"] as string) || null;
+
+      // Atomic: cancel order + refund balance + create ledger entry
       runTransaction(() => {
+        // Re-check status inside transaction to prevent double-cancel race
+        const orderNow = sqliteClient.prepare("SELECT status FROM orders WHERE id = ?").get(order.id) as { status: string } | undefined;
+        if (!orderNow || orderNow.status !== "waiting") {
+          throw new Error("Order is no longer in cancellable state");
+        }
+
         syncDb.cancelOrder(order.id);
         const txUser = syncDb.getUser(user.id);
         if (txUser) {
-          const newBalance = (parseFloat(txUser.balance) + parseFloat(order.price)).toFixed(2);
+          const refundAmount = parseFloat(order.price);
+          if (refundAmount <= 0) throw new Error("Invalid refund amount");
+          const newBalance = (parseFloat(txUser.balance) + refundAmount).toFixed(2);
           syncDb.updateUserBalance(user.id, newBalance);
           syncDb.createTransaction({
             userId: user.id,
@@ -537,13 +769,20 @@ export async function registerRoutes(
             description: "Order cancelled - refund",
             orderId: order.id,
             paymentRef: null,
+            idempotencyKey,
             createdAt: new Date().toISOString(),
           });
         }
       });
 
+      auditLog(req, "order.cancel", {
+        targetType: "order", targetId: order.id,
+        amount: order.price, status: "success",
+      });
+
       res.json({ message: "Order cancelled and refunded" });
     } catch (err: any) {
+      auditLog(req, "order.cancel", { targetType: "order", targetId: String(req.params.id), status: "failed" });
       res.status(500).json({ message: safeError(err) });
     }
   });
@@ -584,13 +823,14 @@ export async function registerRoutes(
     return fallback.toFixed(6);
   }
 
-  app.post("/api/crypto/create-deposit", requireAuth, async (req, res) => {
+  app.post("/api/crypto/create-deposit", requireAuth, financialLimiter, idempotencyGuard("POST:/api/crypto/create-deposit"), async (req, res) => {
     try {
       const user = req.user as any;
       const { currency, amount } = req.body;
       if (!currency || !amount) return res.status(400).json({ message: "Currency and amount are required" });
       const usdAmount = parseFloat(amount);
       if (isNaN(usdAmount) || usdAmount < 1) return res.status(400).json({ message: "Minimum deposit is $1.00" });
+      if (usdAmount > 10000) return res.status(400).json({ message: "Maximum deposit is $10,000.00" });
       const walletAddress = CRYPTO_WALLETS[currency];
       if (!walletAddress) return res.status(400).json({ message: "Unsupported currency" });
       const rate = CRYPTO_RATES[currency];
@@ -613,8 +853,18 @@ export async function registerRoutes(
         status: "pending",
         createdAt: now.toISOString(), expiresAt: expiresAt.toISOString(), completedAt: null,
       });
+
+      auditLog(req, "deposit.create", {
+        targetType: "crypto_deposit", targetId: deposit.id,
+        amount: usdAmount.toFixed(2), status: "success",
+        metadata: { currency },
+      });
+
       res.json(deposit);
-    } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
+    } catch (err: any) {
+      auditLog(req, "deposit.create", { status: "failed" });
+      res.status(500).json({ message: safeError(err) });
+    }
   });
 
   app.get("/api/crypto/deposits", requireAuth, async (req, res) => {
@@ -622,7 +872,7 @@ export async function registerRoutes(
     res.json(await storage.getUserCryptoDeposits(user.id));
   });
 
-  app.post("/api/crypto/:id/submit-hash", requireAuth, async (req, res) => {
+  app.post("/api/crypto/:id/submit-hash", requireAuth, financialLimiter, idempotencyGuard("POST:/api/crypto/submit-hash"), async (req, res) => {
     try {
       const user = req.user as any;
       const { txHash } = req.body;
@@ -634,12 +884,17 @@ export async function registerRoutes(
       if (deposit.userId !== user.id) return res.status(403).json({ message: "Forbidden" });
       if (deposit.status !== "pending") return res.status(400).json({ message: "Deposit is not pending" });
       await storage.updateCryptoDeposit(deposit.id, { txHash: trimmedHash, status: "confirming" });
+
+      auditLog(req, "deposit.submit_hash", {
+        targetType: "crypto_deposit", targetId: deposit.id, status: "success",
+      });
+
       res.json({ message: "Transaction hash submitted. Awaiting confirmation." });
     } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
   });
 
   app.post("/api/crypto/:id/simulate-confirm", requireAuth, async (req, res) => {
-    if (process.env.NODE_ENV === "production") {
+    if (isProduction) {
       return res.status(403).json({ message: "Simulation endpoints are disabled in production" });
     }
     try {
@@ -647,19 +902,28 @@ export async function registerRoutes(
       const deposit = await storage.getCryptoDeposit(Number(req.params.id));
       if (!deposit) return res.status(404).json({ message: "Deposit not found" });
       if (deposit.userId !== user.id) return res.status(403).json({ message: "Forbidden" });
+      if (deposit.status === "completed") return res.status(400).json({ message: "Deposit already completed" });
       if (deposit.status !== "confirming") return res.status(400).json({ message: "Deposit must be in confirming state" });
-      // Atomic: complete deposit + credit balance + create transaction
+      // Atomic: complete deposit + credit balance + create ledger entry
       const now = new Date().toISOString();
       const newBalance = runTransaction(() => {
+        // Re-check status inside transaction
+        const txDeposit = syncDb.getCryptoDeposit(deposit.id);
+        if (!txDeposit || txDeposit.status === "completed") throw new Error("Deposit already completed");
+
         syncDb.updateCryptoDeposit(deposit.id, { status: "completed", completedAt: now } as any);
         const txUser = syncDb.getUser(user.id);
         if (!txUser) throw new Error("User not found");
-        const bal = (parseFloat(txUser.balance) + parseFloat(deposit.amount)).toFixed(2);
+        const creditAmount = parseFloat(deposit.amount);
+        if (creditAmount <= 0) throw new Error("Invalid deposit amount");
+        const bal = (parseFloat(txUser.balance) + creditAmount).toFixed(2);
         syncDb.updateUserBalance(user.id, bal);
         syncDb.createTransaction({
           userId: user.id, type: "deposit", amount: deposit.amount,
           description: `Crypto deposit (${deposit.currency}) confirmed`,
-          orderId: null, paymentRef: null, createdAt: now,
+          orderId: null, paymentRef: null,
+          idempotencyKey: null,
+          createdAt: now,
         });
         return bal;
       });
@@ -667,27 +931,49 @@ export async function registerRoutes(
     } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
   });
 
-  app.post("/api/admin/crypto/:id/confirm", requireAdmin, async (req, res) => {
+  app.post("/api/admin/crypto/:id/confirm", requireAdmin, adminLimiter, idempotencyGuard("POST:/api/admin/crypto/confirm"), async (req, res) => {
     try {
       const deposit = await storage.getCryptoDeposit(Number(req.params.id));
       if (!deposit) return res.status(404).json({ message: "Deposit not found" });
       if (deposit.status === "completed") return res.status(400).json({ message: "Already completed" });
-      // Atomic: complete deposit + credit balance + create transaction
+      if (deposit.status === "expired") return res.status(400).json({ message: "Deposit has expired" });
+
+      const idempotencyKey = (req.headers["idempotency-key"] as string) || null;
+
+      // Atomic: complete deposit + credit balance + create ledger entry
       const now = new Date().toISOString();
       runTransaction(() => {
+        // Re-check inside transaction to prevent double-confirm
+        const txDeposit = syncDb.getCryptoDeposit(deposit.id);
+        if (!txDeposit || txDeposit.status === "completed") throw new Error("Deposit already completed");
+
         syncDb.updateCryptoDeposit(deposit.id, { status: "completed", completedAt: now } as any);
         const txUser = syncDb.getUser(deposit.userId);
         if (!txUser) throw new Error("User not found");
-        const newBalance = (parseFloat(txUser.balance) + parseFloat(deposit.amount)).toFixed(2);
+        const creditAmount = parseFloat(deposit.amount);
+        if (creditAmount <= 0) throw new Error("Invalid deposit amount");
+        const newBalance = (parseFloat(txUser.balance) + creditAmount).toFixed(2);
         syncDb.updateUserBalance(deposit.userId, newBalance);
         syncDb.createTransaction({
           userId: deposit.userId, type: "deposit", amount: deposit.amount,
           description: `Crypto deposit (${deposit.currency}) confirmed by admin`,
-          orderId: null, paymentRef: null, createdAt: now,
+          orderId: null, paymentRef: null,
+          idempotencyKey,
+          createdAt: now,
         });
       });
+
+      auditLog(req, "admin.deposit.confirm", {
+        targetType: "crypto_deposit", targetId: deposit.id,
+        amount: deposit.amount, status: "success",
+        userId: (req.user as any)?.id,
+      });
+
       res.json({ message: "Deposit confirmed and balance credited" });
-    } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
+    } catch (err: any) {
+      auditLog(req, "admin.deposit.confirm", { targetType: "crypto_deposit", targetId: String(req.params.id), status: "failed" });
+      res.status(500).json({ message: safeError(err) });
+    }
   });
 
   app.get("/api/admin/crypto/pending", requireAdmin, async (_req, res) => {
@@ -743,7 +1029,7 @@ export async function registerRoutes(
     });
   });
 
-  app.put("/api/admin/services/:id", requireAdmin, async (req, res) => {
+  app.put("/api/admin/services/:id", requireAdmin, adminLimiter, async (req, res) => {
     try {
       const { price, isActive } = req.body;
       const update: Record<string, any> = {};
@@ -757,6 +1043,7 @@ export async function registerRoutes(
       }
       if (Object.keys(update).length === 0) return res.status(400).json({ message: "No valid fields to update" });
       await storage.updateService(Number(req.params.id), update);
+      auditLog(req, "admin.service.update", { targetType: "service", targetId: String(req.params.id), status: "success" });
       res.json({ message: "Service updated" });
     } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
   });
@@ -782,7 +1069,7 @@ export async function registerRoutes(
     res.json({ balance: user.balance });
   });
 
-  app.post("/api/v1/order", requireApiKey, orderLimiter, async (req, res) => {
+  app.post("/api/v1/order", requireApiKey, orderLimiter, idempotencyGuard("POST:/api/v1/order"), async (req, res) => {
     try {
       const user = (req as any).apiUser;
       const { service } = req.body;
@@ -796,6 +1083,7 @@ export async function registerRoutes(
       if (!freshUser) return res.status(404).json({ error: "User not found" });
       const balance = parseFloat(freshUser.balance);
       const price = parseFloat(svc.price);
+      if (price <= 0) return res.status(400).json({ error: "Invalid service price" });
       if (balance < price) return res.status(400).json({ error: "Insufficient balance" });
 
       // Call TellaBot
@@ -806,8 +1094,9 @@ export async function registerRoutes(
 
       const tbData = tbResult.message[0];
       const phoneNumber = tbData.mdn.startsWith("+") ? tbData.mdn : `+${tbData.mdn}`;
+      const idempotencyKey = (req.headers["idempotency-key"] as string) || null;
 
-      // Atomic: deduct balance + create order + create transaction
+      // Atomic: deduct balance + create order + create ledger entry
       const now = new Date();
       const expiresAt = new Date(now.getTime() + 20 * 60 * 1000);
 
@@ -830,14 +1119,24 @@ export async function registerRoutes(
         syncDb.createTransaction({
           userId: user.id, type: "purchase", amount: `-${svc.price}`,
           description: `${svc.name} number rental`, orderId: ord.id,
-          paymentRef: null, createdAt: now.toISOString(),
+          paymentRef: null,
+          idempotencyKey,
+          createdAt: now.toISOString(),
         });
 
         return ord;
       });
 
+      auditLog(req, "api.order.create", {
+        targetType: "order", targetId: order.id,
+        amount: `-${svc.price}`, status: "success",
+      });
+
       res.json({ orderId: order.id, phoneNumber, status: "waiting", expiresAt: order.expiresAt });
-    } catch (err: any) { res.status(500).json({ error: safeError(err) }); }
+    } catch (err: any) {
+      auditLog(req, "api.order.create", { status: "failed" });
+      res.status(500).json({ error: safeError(err) });
+    }
   });
 
   app.get("/api/v1/order/:id", requireApiKey, async (req, res) => {
@@ -876,24 +1175,40 @@ export async function registerRoutes(
     });
   });
 
-  app.post("/api/v1/order/:id/cancel", requireApiKey, async (req, res) => {
+  app.post("/api/v1/order/:id/cancel", requireApiKey, financialLimiter, idempotencyGuard("POST:/api/v1/order/cancel"), async (req, res) => {
     try {
       const user = (req as any).apiUser;
       const order = await storage.getOrder(Number(req.params.id));
       if (!order) return res.status(404).json({ error: "Order not found" });
       if (order.userId !== user.id) return res.status(403).json({ error: "Forbidden" });
+
+      // Business logic guards
+      if (order.status === "cancelled") return res.status(400).json({ error: "Order already cancelled" });
+      if (order.status === "completed" || order.status === "received") {
+        return res.status(400).json({ error: "Cannot cancel a fulfilled order" });
+      }
       if (order.status !== "waiting") return res.status(400).json({ error: "Cannot cancel" });
 
       if (order.tellabotRequestId) {
         try { await tellabotAPI("reject", { id: order.tellabotRequestId }); } catch (e) {}
       }
 
-      // Atomic: cancel order + refund balance + create transaction
+      const idempotencyKey = (req.headers["idempotency-key"] as string) || null;
+
+      // Atomic: cancel order + refund balance + create ledger entry
       runTransaction(() => {
+        // Re-check status inside transaction
+        const orderNow = sqliteClient.prepare("SELECT status FROM orders WHERE id = ?").get(order.id) as { status: string } | undefined;
+        if (!orderNow || orderNow.status !== "waiting") {
+          throw new Error("Order is no longer in cancellable state");
+        }
+
         syncDb.cancelOrder(order.id);
         const txUser = syncDb.getUser(user.id);
         if (!txUser) throw new Error("User not found during refund transaction");
-        const newBalance = (parseFloat(txUser.balance) + parseFloat(order.price)).toFixed(2);
+        const refundAmount = parseFloat(order.price);
+        if (refundAmount <= 0) throw new Error("Invalid refund amount");
+        const newBalance = (parseFloat(txUser.balance) + refundAmount).toFixed(2);
         syncDb.updateUserBalance(user.id, newBalance);
         syncDb.createTransaction({
           userId: user.id,
@@ -902,20 +1217,31 @@ export async function registerRoutes(
           description: "Order cancelled - refund",
           orderId: order.id,
           paymentRef: null,
+          idempotencyKey,
           createdAt: new Date().toISOString(),
         });
       });
+
+      auditLog(req, "api.order.cancel", {
+        targetType: "order", targetId: order.id,
+        amount: order.price, status: "success",
+      });
+
       res.json({ message: "Order cancelled and refunded" });
-    } catch (err: any) { res.status(500).json({ error: safeError(err) }); }
+    } catch (err: any) {
+      auditLog(req, "api.order.cancel", { targetType: "order", targetId: String(req.params.id), status: "failed" });
+      res.status(500).json({ error: safeError(err) });
+    }
   });
 
   // Profile
   app.post("/api/profile/generate-api-key", requireAuth, async (req, res) => {
     const user = req.user as any;
+    auditLog(req, "profile.generate_api_key", { targetType: "user", targetId: user.id, status: "success" });
     res.json({ apiKey: await storage.generateApiKey(user.id) });
   });
 
-  app.post("/api/profile/change-password", requireAuth, async (req, res) => {
+  app.post("/api/profile/change-password", requireAuth, passwordLimiter, async (req, res) => {
     try {
       const user = req.user as any;
       const { currentPassword, newPassword } = req.body;
@@ -926,12 +1252,28 @@ export async function registerRoutes(
       const freshUser = await storage.getUser(user.id);
       if (!freshUser) return res.status(404).json({ message: "User not found" });
       const isValid = await bcrypt.compare(currentPassword, freshUser.password);
-      if (!isValid) return res.status(400).json({ message: "Current password is incorrect" });
+      if (!isValid) {
+        auditLog(req, "profile.change_password", { targetType: "user", targetId: user.id, status: "failed" });
+        return res.status(400).json({ message: "Current password is incorrect" });
+      }
       const hashed = await bcrypt.hash(newPassword, 10);
       await storage.updateUserPassword(user.id, hashed);
+      auditLog(req, "profile.change_password", { targetType: "user", targetId: user.id, status: "success" });
       res.json({ message: "Password updated" });
     } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
   });
+
+  // Periodic cleanup: expire idempotency keys
+  setInterval(() => {
+    try {
+      const cleaned = storage.cleanExpiredIdempotencyKeys();
+      if (cleaned > 0) {
+        console.log(`Cleaned ${cleaned} expired idempotency key(s)`);
+      }
+    } catch (err) {
+      console.error("Idempotency cleanup error:", err);
+    }
+  }, 60 * 60 * 1000); // Every hour
 
   // Initial service sync on startup
   fetchTellabotServices().then(() => {

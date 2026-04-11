@@ -1,7 +1,7 @@
-import { type User, type InsertUser, users, type Service, type InsertService, services, type Order, type InsertOrder, orders, type Transaction, type InsertTransaction, transactions, type CryptoDeposit, type InsertCryptoDeposit, cryptoDeposits } from "@shared/schema";
+import { type User, type InsertUser, users, type Service, type InsertService, services, type Order, type InsertOrder, orders, type Transaction, type InsertTransaction, transactions, type CryptoDeposit, type InsertCryptoDeposit, cryptoDeposits, idempotencyKeys, auditLogs, type IdempotencyKey, type AuditLog } from "@shared/schema";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
-import { eq, and, desc, or } from "drizzle-orm";
+import { eq, and, desc, or, lt } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 
@@ -125,6 +125,42 @@ sqlite.exec(`
   CREATE INDEX IF NOT EXISTS idx_crypto_deposits_status ON crypto_deposits(status);
   CREATE INDEX IF NOT EXISTS idx_crypto_deposits_unique_amount ON crypto_deposits(unique_amount, status);
   CREATE INDEX IF NOT EXISTS idx_crypto_deposits_trongrid_tx ON crypto_deposits(trongrid_tx_id);
+
+  -- Idempotency keys table
+  CREATE TABLE IF NOT EXISTS idempotency_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    route TEXT NOT NULL,
+    method TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'processing',
+    status_code INTEGER,
+    response_body TEXT,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_idempotency_key_user_route ON idempotency_keys(key, user_id, route);
+  CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_keys(expires_at);
+
+  -- Audit logs table (immutable)
+  CREATE TABLE IF NOT EXISTS audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    actor_role TEXT,
+    ip TEXT,
+    user_agent TEXT,
+    action TEXT NOT NULL,
+    target_type TEXT,
+    target_id TEXT,
+    amount TEXT,
+    status TEXT,
+    request_id TEXT,
+    idempotency_key TEXT,
+    metadata TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id);
+  CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
 `);
 
 // Migrate: rename stripe_session_id -> payment_ref for existing databases
@@ -158,6 +194,17 @@ try {
   }
 } catch (err) {
   console.error("Crypto deposits migration failed (non-fatal):", err);
+}
+
+// Migrate: add idempotency_key column to transactions for existing databases
+try {
+  const txCols = sqlite.pragma("table_info(transactions)") as { name: string }[];
+  if (!txCols.some(c => c.name === "idempotency_key")) {
+    sqlite.exec("ALTER TABLE transactions ADD COLUMN idempotency_key TEXT");
+    console.log("Migration: added idempotency_key to transactions");
+  }
+} catch (err) {
+  console.error("Transactions migration failed (non-fatal):", err);
 }
 
 // Ensure deposit_poll_state table and seed row exist
@@ -247,6 +294,28 @@ export interface IStorage {
   getDepositPollTimestamp(): number;
   setDepositPollTimestamp(ts: number): void;
   expireStalePendingDeposits(): number;
+
+  // Idempotency
+  getIdempotencyKey(key: string, userId: number, route: string): IdempotencyKey | undefined;
+  createIdempotencyKey(data: { key: string; userId: number; route: string; method: string }): IdempotencyKey;
+  completeIdempotencyKey(id: number, statusCode: number, responseBody: string, status: "success" | "failed"): void;
+  cleanExpiredIdempotencyKeys(): number;
+
+  // Audit logs
+  createAuditLog(data: {
+    userId?: number | null;
+    actorRole?: string | null;
+    ip?: string | null;
+    userAgent?: string | null;
+    action: string;
+    targetType?: string | null;
+    targetId?: string | null;
+    amount?: string | null;
+    status?: string | null;
+    requestId?: string | null;
+    idempotencyKey?: string | null;
+    metadata?: string | null;
+  }): void;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -423,6 +492,82 @@ export class DatabaseStorage implements IStorage {
       "UPDATE crypto_deposits SET status = 'expired' WHERE status = 'pending' AND expires_at < ?"
     ).run(now);
     return result.changes;
+  }
+
+  // ========== Idempotency ==========
+
+  getIdempotencyKey(key: string, userId: number, route: string): IdempotencyKey | undefined {
+    return db.select().from(idempotencyKeys)
+      .where(and(
+        eq(idempotencyKeys.key, key),
+        eq(idempotencyKeys.userId, userId),
+        eq(idempotencyKeys.route, route),
+      ))
+      .get();
+  }
+
+  createIdempotencyKey(data: { key: string; userId: number; route: string; method: string }): IdempotencyKey {
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24h TTL
+    return db.insert(idempotencyKeys).values({
+      key: data.key,
+      userId: data.userId,
+      route: data.route,
+      method: data.method,
+      status: "processing",
+      statusCode: null,
+      responseBody: null,
+      createdAt: now.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+    }).returning().get();
+  }
+
+  completeIdempotencyKey(id: number, statusCode: number, responseBody: string, status: "success" | "failed"): void {
+    db.update(idempotencyKeys)
+      .set({ statusCode, responseBody, status })
+      .where(eq(idempotencyKeys.id, id))
+      .run();
+  }
+
+  cleanExpiredIdempotencyKeys(): number {
+    const now = new Date().toISOString();
+    const result = sqlite.prepare(
+      "DELETE FROM idempotency_keys WHERE expires_at < ?"
+    ).run(now);
+    return result.changes;
+  }
+
+  // ========== Audit Logs ==========
+
+  createAuditLog(data: {
+    userId?: number | null;
+    actorRole?: string | null;
+    ip?: string | null;
+    userAgent?: string | null;
+    action: string;
+    targetType?: string | null;
+    targetId?: string | null;
+    amount?: string | null;
+    status?: string | null;
+    requestId?: string | null;
+    idempotencyKey?: string | null;
+    metadata?: string | null;
+  }): void {
+    db.insert(auditLogs).values({
+      userId: data.userId ?? null,
+      actorRole: data.actorRole ?? null,
+      ip: data.ip ?? null,
+      userAgent: data.userAgent ?? null,
+      action: data.action,
+      targetType: data.targetType ?? null,
+      targetId: data.targetId ?? null,
+      amount: data.amount ?? null,
+      status: data.status ?? null,
+      requestId: data.requestId ?? null,
+      idempotencyKey: data.idempotencyKey ?? null,
+      metadata: data.metadata ?? null,
+      createdAt: new Date().toISOString(),
+    }).run();
   }
 }
 

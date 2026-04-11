@@ -135,6 +135,7 @@ async function processTransfer(tx: TRC20Transaction): Promise<void> {
         description: `USDT TRC20 deposit auto-confirmed`,
         orderId: null,
         paymentRef: `trongrid:${txId}`,
+        idempotencyKey: `trongrid:${txId}`,
         createdAt: now,
       });
     });

@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, uniqueIndex } from "drizzle-orm/sqlite-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -54,15 +54,16 @@ export const insertOrderSchema = createInsertSchema(orders).omit({ id: true });
 export type InsertOrder = z.infer<typeof insertOrderSchema>;
 export type Order = typeof orders.$inferSelect;
 
-// Transactions table
+// Transactions table (append-only ledger)
 export const transactions = sqliteTable("transactions", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: integer("user_id").notNull(),
-  type: text("type").notNull(), // deposit/purchase/refund
+  type: text("type").notNull(), // deposit/purchase/refund/reversal
   amount: text("amount").notNull(),
   description: text("description"),
   orderId: integer("order_id"),
   paymentRef: text("payment_ref"),
+  idempotencyKey: text("idempotency_key"),
   createdAt: text("created_at").notNull(),
 });
 
@@ -91,3 +92,41 @@ export const cryptoDeposits = sqliteTable("crypto_deposits", {
 export const insertCryptoDepositSchema = createInsertSchema(cryptoDeposits).omit({ id: true });
 export type InsertCryptoDeposit = z.infer<typeof insertCryptoDepositSchema>;
 export type CryptoDeposit = typeof cryptoDeposits.$inferSelect;
+
+// Idempotency keys table
+export const idempotencyKeys = sqliteTable("idempotency_keys", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  key: text("key").notNull(),
+  userId: integer("user_id").notNull(),
+  route: text("route").notNull(),
+  method: text("method").notNull(),
+  status: text("status").notNull().default("processing"), // processing/success/failed
+  statusCode: integer("status_code"),
+  responseBody: text("response_body"), // JSON snapshot
+  createdAt: text("created_at").notNull(),
+  expiresAt: text("expires_at").notNull(),
+}, (table) => [
+  uniqueIndex("idx_idempotency_key_user_route").on(table.key, table.userId, table.route),
+]);
+
+export type IdempotencyKey = typeof idempotencyKeys.$inferSelect;
+
+// Audit logs table (immutable)
+export const auditLogs = sqliteTable("audit_logs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id"),
+  actorRole: text("actor_role"),
+  ip: text("ip"),
+  userAgent: text("user_agent"),
+  action: text("action").notNull(),
+  targetType: text("target_type"),
+  targetId: text("target_id"),
+  amount: text("amount"),
+  status: text("status"),
+  requestId: text("request_id"),
+  idempotencyKey: text("idempotency_key"),
+  metadata: text("metadata"), // JSON
+  createdAt: text("created_at").notNull(),
+});
+
+export type AuditLog = typeof auditLogs.$inferSelect;
