@@ -179,7 +179,7 @@ try {
 
 async function seedDatabase() {
   const adminEmail = process.env.ADMIN_EMAIL || "admin@getotps.com";
-  const adminPassword = process.env.ADMIN_PASSWORD || "admin123";
+  const adminPassword = process.env.ADMIN_PASSWORD || (process.env.NODE_ENV === "production" ? (() => { throw new Error("ADMIN_PASSWORD must be set in production"); })() : "admin123");
   const adminUsername = process.env.ADMIN_USERNAME || "admin";
 
   // Create default admin user

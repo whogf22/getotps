@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /#/dashboard
+Disallow: /#/admin
+Disallow: /#/profile
+
+Sitemap: https://getotps.com/sitemap.xml

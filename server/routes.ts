@@ -238,6 +238,15 @@ export async function registerRoutes(
       if (!username || !email || !password) {
         return res.status(400).json({ message: "All fields required" });
       }
+      if (password.length < 8) {
+        return res.status(400).json({ message: "Password must be at least 8 characters" });
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ message: "Invalid email format" });
+      }
+      if (username.length < 3 || username.length > 32 || !/^[a-zA-Z0-9_-]+$/.test(username)) {
+        return res.status(400).json({ message: "Username must be 3-32 characters (letters, numbers, _ or -)" });
+      }
       const existing = await storage.getUserByEmail(email);
       if (existing) return res.status(400).json({ message: "Email already registered" });
       const existingUsername = await storage.getUserByUsername(username);
@@ -248,7 +257,7 @@ export async function registerRoutes(
 
       req.login(user, (err) => {
         if (err) return res.status(500).json({ message: "Login failed after registration" });
-        const { password: _, ...safeUser } = user;
+        const { password: _, apiKey: __, ...safeUser } = user;
         res.json(safeUser);
       });
     } catch (err: any) {
@@ -262,7 +271,7 @@ export async function registerRoutes(
       if (!user) return res.status(401).json({ message: info?.message || "Invalid credentials" });
       req.login(user, (loginErr) => {
         if (loginErr) return res.status(500).json({ message: "Login failed" });
-        const { password: _, ...safeUser } = user;
+        const { password: _, apiKey: __, ...safeUser } = user;
         res.json(safeUser);
       });
     })(req, res, next);
@@ -276,7 +285,7 @@ export async function registerRoutes(
     const user = req.user as any;
     const freshUser = await storage.getUser(user.id);
     if (!freshUser) return res.status(404).json({ message: "User not found" });
-    const { password: _, ...safeUser } = freshUser;
+    const { password: _, apiKey: __, ...safeUser } = freshUser;
     res.json(safeUser);
   });
 
@@ -749,6 +758,33 @@ export async function registerRoutes(
     } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
   });
 
+  app.post("/api/admin/users/:id/add-balance", requireAdmin, async (req, res) => {
+    try {
+      const { amount } = req.body;
+      if (!amount || isNaN(Number(amount)) || Number(amount) === 0) {
+        return res.status(400).json({ message: "Valid non-zero amount required" });
+      }
+      const numAmount = Number(amount);
+      if (numAmount > 10000) {
+        return res.status(400).json({ message: "Maximum single adjustment is $10,000" });
+      }
+      const targetUser = await storage.getUser(Number(req.params.id));
+      if (!targetUser) return res.status(404).json({ message: "User not found" });
+      const newBalance = (parseFloat(targetUser.balance) + numAmount).toFixed(2);
+      await storage.updateUserBalance(targetUser.id, newBalance);
+      await storage.createTransaction({
+        userId: targetUser.id,
+        type: "admin",
+        amount: numAmount.toFixed(2),
+        description: `Admin balance adjustment (by admin ${(req.user as any).id})`,
+        orderId: null,
+        paymentRef: null,
+        createdAt: new Date().toISOString(),
+      });
+      res.json({ message: "Balance updated", newBalance });
+    } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
+  });
+
   // ========== API v1 (API key auth) ==========
 
   async function requireApiKey(req: Request, res: Response, next: any) {
@@ -896,6 +932,9 @@ export async function registerRoutes(
     try {
       const user = req.user as any;
       const { currentPassword, newPassword } = req.body;
+      if (!newPassword || newPassword.length < 8) {
+        return res.status(400).json({ message: "New password must be at least 8 characters" });
+      }
       const freshUser = await storage.getUser(user.id);
       if (!freshUser) return res.status(404).json({ message: "User not found" });
       const isValid = await bcrypt.compare(currentPassword, freshUser.password);
