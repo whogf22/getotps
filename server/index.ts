@@ -16,8 +16,30 @@ declare module "http" {
 }
 
 app.use(helmet({
-  contentSecurityPolicy: false, // SPA serves its own assets
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: ["'self'"],
+      frameSrc: ["'none'"],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'"],
+      frameAncestors: ["'self'"],
+      scriptSrcAttr: ["'none'"],
+      upgradeInsecureRequests: [],
+    },
+  },
+  referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+  frameguard: { action: "deny" },
 }));
+app.use((_req, res, next) => {
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+  next();
+});
 
 app.use(
   express.json({
