@@ -306,17 +306,23 @@ export async function registerRoutes(
       const tellabotMap = new Map(tellabotServices.map((s: any) => [s.name, s]));
       const enriched = dbServices.map(svc => {
         const tb = tellabotMap.get(svc.name);
-        return {
-          ...svc,
-          available: tb ? parseInt(tb.otp_available) : 0,
-          costPrice: tb ? tb.price : null,
-        };
+      // Strip internal fields (costPrice, upstreamPrice, priceLocked, internal id) from public response
+      const { costPrice: _cp, upstreamPrice: _up, priceLocked: _pl, id: _id, ...publicSvc } = svc as any;
+      return {
+        ...publicSvc,
+        available: tb ? parseInt(tb.otp_available) : 0,
+      };
       });
       res.json(enriched);
     } catch (err) {
       // Fallback to DB
       const dbServices = await storage.getAllServices();
-      res.json(dbServices);
+      // Strip internal fields on fallback too
+      const safe = dbServices.map((s: any) => {
+        const { costPrice: _cp, upstreamPrice: _up, priceLocked: _pl, id: _id, ...rest } = s;
+        return rest;
+      });
+      res.json(safe);
     }
   });
 
