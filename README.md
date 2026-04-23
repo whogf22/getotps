@@ -18,6 +18,9 @@ Virtual phone number and OTP verification platform. GetOTPs provides temporary p
 - Real-time OTP detection and extraction
 - Crypto deposit system with multiple currencies
 - TronGrid USDT TRC20 auto-deposit detection
+- Financial safety hardening (idempotency + atomic balance updates + append-only ledger entries)
+- Webhook signature verification (HMAC + timestamp replay window)
+- Daily reconciliation and freeze-on-mismatch safeguard
 - User dashboard with balance management
 - Admin panel with revenue tracking and user management
 - RESTful API with API key authentication
@@ -83,6 +86,15 @@ See `.env.example` for all required configuration variables.
 
 This codebase does not automate exchange conversion from master USDC holdings to provider funding assets.  
 Operations should periodically transfer and convert funds externally before topping up the upstream OTP supplier account.
+
+## Financial Controls
+
+- Financial write endpoints require `Idempotency-Key` headers (`/api/buy-number`, `/api/deposit`, `/api/withdraw`, `/api/upgrade`, `/api/payment/*`).
+- User balance updates are executed through atomic immediate transactions and synchronized in both decimal and cents fields.
+- Ledger entries are append-only and every transaction is validated for debit/credit balance.
+- Circle webhooks are accepted only with valid HMAC signature, valid timestamp (<= 300 seconds), and unique webhook IDs.
+- Cleanup worker auto-refunds stale pending orders and emits critical alerts for stuck flows.
+- Reconciliation runs daily at 00:00 UTC and freezes financial writes if mismatch exceeds $0.01.
 
 ## API Documentation
 
