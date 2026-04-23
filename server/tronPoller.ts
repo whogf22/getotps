@@ -1,5 +1,9 @@
 import { storage, runTransaction, syncDb } from "./storage";
-import { log } from "./index";
+import { creditUser, parseAmountToCents } from "./financial/operations";
+import { sendFinancialAlert } from "./financial/alerts";
+const log = (message: string, source = "tron-poller") => {
+  console.log(`${new Date().toISOString()} [${source}] ${message}`);
+};
 
 const TRONGRID_BASE = "https://api.trongrid.io";
 const USDT_DECIMALS = 6; // USDT TRC20 uses 6 decimal places (1 USDT = 1_000_000 sun)
@@ -115,33 +119,29 @@ async function processTransfer(tx: TRC20Transaction): Promise<void> {
       const txDeposit = syncDb.getCryptoDeposit(deposit.id);
       if (!txDeposit || txDeposit.status === "completed") return;
 
-      const txUser = syncDb.getUser(deposit.userId);
-      if (!txUser) return;
-
       syncDb.updateCryptoDeposit(deposit.id, {
         status: "completed",
         trongridTxId: txId,
         confirmedAmount: amountUsdt.toFixed(6),
         completedAt: now,
       } as any);
-
-      const newBalance = (parseFloat(txUser.balance) + parseFloat(deposit.amount)).toFixed(2);
-      syncDb.updateUserBalance(deposit.userId, newBalance);
-
-      syncDb.createTransaction({
-        userId: deposit.userId,
-        type: "deposit",
-        amount: deposit.amount,
-        description: `USDT TRC20 deposit auto-confirmed`,
-        orderId: null,
-        paymentRef: `trongrid:${txId}`,
-        createdAt: now,
-      });
+    });
+    creditUser({
+      userId: deposit.userId,
+      amountCents: parseAmountToCents(deposit.amount),
+      idempotencyKey: `trongrid:${txId}`,
+      type: "deposit_credit",
+      metadata: { depositId: deposit.id, txId },
     });
 
     log(`TronGrid: auto-confirmed deposit #${deposit.id} — $${deposit.amount} for user #${deposit.userId} (tx: ${txId.slice(0, 16)}...)`, "tron-poller");
   } catch (err) {
     log(`TronGrid: failed to confirm deposit #${deposit.id}: ${err}`, "tron-poller");
+    void sendFinancialAlert("critical", "trongrid_credit_failed", {
+      depositId: deposit.id,
+      txId,
+      reason: String(err),
+    });
   }
 }
 

@@ -26,7 +26,12 @@ export const syncDb = {
     return db.select().from(users).where(eq(users.id, id)).get();
   },
   updateUserBalance(userId: number, balance: string): void {
-    db.update(users).set({ balance }).where(eq(users.id, userId)).run();
+    const cents = Math.round(Number.parseFloat(balance) * 100);
+    try {
+      sqlite.prepare("UPDATE users SET balance = ?, balance_cents = ? WHERE id = ?").run(balance, cents, userId);
+    } catch {
+      sqlite.prepare("UPDATE users SET balance = ? WHERE id = ?").run(balance, userId);
+    }
   },
   createOrder(data: InsertOrder): Order {
     return db.insert(orders).values(data).returning().get();
@@ -311,7 +316,12 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateUserBalance(userId: number, balance: string): Promise<void> {
-    db.update(users).set({ balance }).where(eq(users.id, userId)).run();
+    const cents = Math.round(Number.parseFloat(balance) * 100);
+    try {
+      sqlite.prepare("UPDATE users SET balance = ?, balance_cents = ? WHERE id = ?").run(balance, cents, userId);
+    } catch {
+      sqlite.prepare("UPDATE users SET balance = ? WHERE id = ?").run(balance, userId);
+    }
   }
 
   async updateUserPassword(userId: number, password: string): Promise<void> {

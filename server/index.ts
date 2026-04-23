@@ -5,6 +5,9 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { startTronPoller } from "./tronPoller";
 import { startCleanupJobs } from "./jobs/cleanup";
+import { initFinancialSchema } from "./financial/core";
+import { financialIdempotencyMiddleware } from "./financial/idempotency";
+import { startReconciliationJob } from "./financial/reconciliation";
 import { createServer } from "http";
 
 const app = express();
@@ -100,6 +103,8 @@ app.use(
 );
 
 app.use(express.urlencoded({ extended: false }));
+initFinancialSchema();
+app.use(financialIdempotencyMiddleware);
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
@@ -183,6 +188,7 @@ app.use((req, res, next) => {
       // Start TronGrid USDT deposit poller
       startTronPoller();
       startCleanupJobs();
+      startReconciliationJob();
     },
   );
 })();

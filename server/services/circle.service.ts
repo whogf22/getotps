@@ -1,3 +1,5 @@
+import crypto from "crypto";
+
 type CircleWallet = {
   id: string;
   address: string;
