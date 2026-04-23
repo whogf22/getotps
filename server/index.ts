@@ -4,10 +4,15 @@ import helmet from "helmet";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { startTronPoller } from "./tronPoller";
+import { startCleanupJobs } from "./jobs/cleanup";
 import { createServer } from "http";
 
 const app = express();
 const httpServer = createServer(app);
+const isProduction = process.env.NODE_ENV === "production";
+
+// Respect reverse proxies (nginx / Cloudflare / host ingress) for real client IP and secure cookies.
+app.set("trust proxy", isProduction ? 1 : false);
 
 declare module "http" {
   interface IncomingMessage {
@@ -36,6 +41,51 @@ app.use(helmet({
   referrerPolicy: { policy: "strict-origin-when-cross-origin" },
   frameguard: { action: "deny" },
 }));
+
+const allowedOrigins = new Set(
+  (process.env.ALLOWED_ORIGINS || process.env.APP_URL || "http://localhost:5000")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+);
+allowedOrigins.add("http://localhost:5000");
+allowedOrigins.add("http://127.0.0.1:5000");
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (!origin) return next();
+  if (allowedOrigins.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token, X-API-Key");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+    res.setHeader("Vary", "Origin");
+  }
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+  return next();
+});
+
+// Basic CSRF defense for cookie-authenticated mutating requests.
+app.use((req, res, next) => {
+  if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
+  if (!req.path.startsWith("/api")) return next();
+
+  const apiKeyHeader = req.headers["x-api-key"];
+  if (apiKeyHeader) return next();
+
+  const origin = req.headers.origin;
+  const referer = req.headers.referer;
+  if (!origin && !referer) return res.status(403).json({ message: "Blocked request origin" });
+
+  const candidate = origin || referer || "";
+  const matched = Array.from(allowedOrigins).some((allowed) => candidate.startsWith(allowed));
+  if (!matched) {
+    return res.status(403).json({ message: "Invalid request origin" });
+  }
+  return next();
+});
 app.use((_req, res, next) => {
   res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
   next();
@@ -132,6 +182,7 @@ app.use((req, res, next) => {
 
       // Start TronGrid USDT deposit poller
       startTronPoller();
+      startCleanupJobs();
     },
   );
 })();

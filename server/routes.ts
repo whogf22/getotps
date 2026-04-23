@@ -5,8 +5,19 @@ import session from "express-session";
 import passport from "passport";
 import { Strategy as LocalStrategy } from "passport-local";
 import bcrypt from "bcryptjs";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import BetterSqlite3SessionStore from "better-sqlite3-session-store";
+import {
+  buyNumberFromTellabot,
+  cancelTellabotNumber,
+  waitForSmsCode,
+} from "./services/tellabot.service";
+import {
+  createUserWallet,
+  getUserUsdcBalance,
+  transferFromUserToMaster,
+} from "./services/circle.service";
+import { getUsdcSellPrice } from "./services/pricing.service";
 
 // Extend session type
 declare module "express-session" {
@@ -136,11 +147,6 @@ export async function registerRoutes(
 
   const isProduction = process.env.NODE_ENV === "production";
 
-  // Trust proxy for secure cookies behind Nginx
-  if (isProduction) {
-    app.set("trust proxy", 1);
-  }
-
   if (!process.env.SESSION_SECRET) {
     if (isProduction) {
       throw new Error("FATAL: SESSION_SECRET must be set in production. Refusing to start with insecure default.");
@@ -203,6 +209,11 @@ export async function registerRoutes(
     res.status(403).json({ message: "Forbidden" });
   }
 
+  function sanitizeOrderForClient(order: any) {
+    const { tellabotRequestId: _tbid, tellabotMdn: _tbmdn, activationId: _aid, costPrice: _cost, ...safe } = order;
+    return safe;
+  }
+
   // ========== RATE LIMITING ==========
 
   // Strict limiter for auth routes (login, register)
@@ -211,6 +222,7 @@ export async function registerRoutes(
     max: 10, // 10 attempts per window
     standardHeaders: true,
     legacyHeaders: false,
+    keyGenerator: (req) => ipKeyGenerator(req.ip || "127.0.0.1"),
     message: { message: "Too many attempts. Please try again in 15 minutes." },
   });
 
@@ -220,6 +232,7 @@ export async function registerRoutes(
     max: 60, // 60 requests per minute
     standardHeaders: true,
     legacyHeaders: false,
+    keyGenerator: (req) => ipKeyGenerator(req.ip || "127.0.0.1"),
     message: { message: "Too many requests. Please slow down." },
   });
 
@@ -229,6 +242,7 @@ export async function registerRoutes(
     max: 10, // 10 orders per minute
     standardHeaders: true,
     legacyHeaders: false,
+    keyGenerator: (req) => ipKeyGenerator(req.ip || "127.0.0.1"),
     message: { message: "Too many order requests. Please slow down." },
   });
 
@@ -292,6 +306,147 @@ export async function registerRoutes(
     if (!freshUser) return res.status(404).json({ message: "User not found" });
     const { password: _, apiKey: __, ...safeUser } = freshUser;
     res.json(safeUser);
+  });
+
+  // ========== CIRCLE WALLET ==========
+  app.post("/api/wallet/create", requireAuth, async (req, res) => {
+    try {
+      const user = req.user as any;
+      const freshUser = await storage.getUser(user.id);
+      if (!freshUser) return res.status(404).json({ message: "User not found" });
+
+      if (freshUser.circleWalletId && freshUser.circleWalletAddress) {
+        return res.json({
+          walletAddress: freshUser.circleWalletAddress,
+          blockchain: freshUser.circleWalletBlockchain,
+        });
+      }
+
+      const wallet = await createUserWallet();
+      await storage.updateUserCircleWallet(user.id, wallet);
+      return res.json({
+        walletAddress: wallet.address,
+        blockchain: wallet.blockchain,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ message: safeError(err) });
+    }
+  });
+
+  app.get("/api/wallet/balance", requireAuth, async (req, res) => {
+    try {
+      const user = req.user as any;
+      const freshUser = await storage.getUser(user.id);
+      if (!freshUser) return res.status(404).json({ message: "User not found" });
+      if (!freshUser.circleWalletId) return res.json({ balanceUsdc: 0 });
+
+      const balanceUsdc = await getUserUsdcBalance(freshUser.circleWalletId);
+      return res.json({
+        balanceUsdc,
+        walletAddress: freshUser.circleWalletAddress,
+        blockchain: freshUser.circleWalletBlockchain,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ message: safeError(err) });
+    }
+  });
+
+  // ========== OTP PURCHASE (CIRCLE + TELLABOT HIDDEN UPSTREAM) ==========
+  app.post("/api/buy-number", requireAuth, orderLimiter, async (req, res) => {
+    try {
+      const user = req.user as any;
+      const { service } = req.body as { service?: string };
+      if (!service || typeof service !== "string") {
+        return res.status(400).json({ message: "service is required" });
+      }
+
+      const cleanService = service.trim().toLowerCase();
+      const matchedService =
+        (await storage.getServiceBySlug(cleanService)) ||
+        (await storage.getAllServices()).find((svc) => svc.name.toLowerCase() === cleanService);
+
+      if (!matchedService) {
+        return res.status(404).json({ message: "Service not found" });
+      }
+
+      const freshUser = await storage.getUser(user.id);
+      if (!freshUser) return res.status(404).json({ message: "User not found" });
+
+      let walletId = freshUser.circleWalletId;
+      if (!walletId) {
+        const wallet = await createUserWallet();
+        await storage.updateUserCircleWallet(user.id, wallet);
+        walletId = wallet.id;
+      }
+
+      const yourPrice = getUsdcSellPrice(cleanService, matchedService.price);
+      const balanceUsdc = await getUserUsdcBalance(walletId);
+      if (balanceUsdc < Number.parseFloat(yourPrice)) {
+        return res.status(400).json({ message: "Insufficient USDC balance" });
+      }
+
+      await transferFromUserToMaster(walletId, yourPrice);
+      const upstream = await buyNumberFromTellabot(cleanService);
+
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + 20 * 60 * 1000);
+
+      const order = await storage.createOrder({
+        userId: user.id,
+        serviceId: matchedService.id,
+        serviceName: matchedService.name,
+        phoneNumber: upstream.phoneNumber.startsWith("+")
+          ? upstream.phoneNumber
+          : `+${upstream.phoneNumber}`,
+        status: "waiting",
+        otpCode: null,
+        smsMessages: null,
+        price: yourPrice,
+        tellabotRequestId: null,
+        activationId: upstream.activationId,
+        tellabotMdn: null,
+        costPrice: null,
+        createdAt: now.toISOString(),
+        expiresAt: expiresAt.toISOString(),
+        completedAt: null,
+      });
+
+      return res.json({
+        orderId: order.id,
+        phoneNumber: order.phoneNumber,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ message: safeError(err) });
+    }
+  });
+
+  app.get("/api/check-sms/:orderId", requireAuth, async (req, res) => {
+    try {
+      const user = req.user as any;
+      const rawOrderId = Array.isArray(req.params.orderId) ? req.params.orderId[0] : req.params.orderId;
+      const orderId = Number.parseInt(rawOrderId, 10);
+      if (Number.isNaN(orderId)) return res.status(400).json({ message: "Invalid order id" });
+
+      const order = await storage.getOrder(orderId);
+      if (!order) return res.status(404).json({ message: "Order not found" });
+      if (order.userId !== user.id) return res.status(403).json({ message: "Forbidden" });
+
+      if (!order.activationId) {
+        return res.status(400).json({ message: "Order has no active upstream reservation" });
+      }
+
+      const code = await waitForSmsCode(order.activationId);
+      if (code) {
+        await storage.updateOrderStatus(order.id, "completed", code);
+        return res.json({ code, refunded: false });
+      }
+
+      await storage.updateOrderStatus(order.id, "failed");
+      await cancelTellabotNumber(order.activationId);
+      return res.json({ code: null, refunded: true });
+    } catch (err: any) {
+      return res.status(500).json({ message: safeError(err) });
+    }
   });
 
   // ========== SERVICES (TellaBot-backed) ==========
@@ -419,13 +574,13 @@ export async function registerRoutes(
   app.get("/api/orders", requireAuth, async (req, res) => {
     const user = req.user as any;
     const userOrders = await storage.getUserOrders(user.id);
-    res.json(userOrders);
+    res.json(userOrders.map(sanitizeOrderForClient));
   });
 
   app.get("/api/orders/active", requireAuth, async (req, res) => {
     const user = req.user as any;
     const activeOrders = await storage.getActiveOrders(user.id);
-    res.json(activeOrders);
+    res.json(activeOrders.map(sanitizeOrderForClient));
   });
 
   app.get("/api/orders/:id", requireAuth, async (req, res) => {
@@ -435,7 +590,7 @@ export async function registerRoutes(
     if (order.userId !== user.id && (req.user as any)?.role !== "admin") {
       return res.status(403).json({ message: "Forbidden" });
     }
-    res.json(order);
+    res.json(sanitizeOrderForClient(order));
   });
 
   // Check for SMS — calls TellaBot read_sms

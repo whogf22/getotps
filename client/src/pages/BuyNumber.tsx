@@ -27,7 +27,22 @@ export default function BuyNumber() {
   });
 
   const buyMutation = useMutation({
-    mutationFn: async (serviceId: number) => { const res = await apiRequest("POST", "/api/orders", { serviceId }); return res.json(); },
+    mutationFn: async (service: { id: number; slug: string }) => {
+      const tryCircleRoute = async () => {
+        const res = await apiRequest("POST", "/api/buy-number", { service: service.slug });
+        return res.json();
+      };
+      const fallbackLegacyRoute = async () => {
+        const res = await apiRequest("POST", "/api/orders", { serviceId: service.id });
+        return res.json();
+      };
+
+      try {
+        return await tryCircleRoute();
+      } catch {
+        return await fallbackLegacyRoute();
+      }
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/orders"] });
       queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
@@ -218,7 +233,7 @@ export default function BuyNumber() {
 
                     <Button
                       className="w-full"
-                      onClick={() => buyMutation.mutate(selectedService.id)}
+                      onClick={() => buyMutation.mutate({ id: selectedService.id, slug: selectedService.slug })}
                       disabled={buyMutation.isPending || balance < parseFloat(selectedService.price)}
                     >
                       {buyMutation.isPending ? "Getting number..." :

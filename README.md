@@ -1,13 +1,14 @@
 # GetOTPs
 
-Virtual phone number and OTP verification platform. GetOTPs provides temporary phone numbers for SMS verification, powered by the TellaBot API with crypto deposit support and TronGrid auto-detection.
+Virtual phone number and OTP verification platform. GetOTPs provides temporary phone numbers for SMS verification, powered by an upstream OTP supplier integration with crypto deposit support and TronGrid auto-detection.
 
 ## Tech Stack
 
 - **Frontend:** React + Vite + TypeScript + Tailwind CSS + shadcn/ui
 - **Backend:** Express.js + TypeScript + Passport.js
 - **Database:** SQLite (better-sqlite3) + Drizzle ORM
-- **SMS Provider:** TellaBot API
+- **SMS Provider:** Hidden upstream provider integration (Tellabot server-side only)
+- **Wallet rail:** Circle Dev-Controlled Wallets (USDC deposit + server-side OTP payment)
 - **Payments:** Crypto deposits (BTC, ETH, USDT, USDC, LTC) with TronGrid auto-detection
 - **Session Store:** SQLite-backed (better-sqlite3-session-store)
 
@@ -62,6 +63,26 @@ Then edit `.env` with real credentials and restart with PM2.
 ## Environment Variables
 
 See `.env.example` for all required configuration variables.
+
+## Hidden Upstream OTP Integration
+
+- Upstream provider calls are **server-side only**.
+- Browser/client responses never expose upstream API keys or activation IDs.
+- OTP lifecycle is handled by backend endpoints:
+  - `POST /api/buy-number`
+  - `GET /api/check-sms/:orderId`
+
+## Circle Wallet Deposit Flow
+
+- Each user can be assigned a Circle Dev-Controlled wallet (EOA).
+- Dashboard/Add Funds UI can generate and display a user-specific USDC deposit address.
+- Backend fetches USDC wallet balance using Circle APIs.
+- OTP purchase flow transfers USDC from user wallet to configured master wallet before upstream number purchase.
+
+### Ops Note
+
+This codebase does not automate exchange conversion from master USDC holdings to provider funding assets.  
+Operations should periodically transfer and convert funds externally before topping up the upstream OTP supplier account.
 
 ## API Documentation
 

@@ -54,7 +54,10 @@ sqlite.exec(`
     password TEXT NOT NULL,
     balance TEXT NOT NULL DEFAULT '0.00',
     api_key TEXT UNIQUE,
-    role TEXT NOT NULL DEFAULT 'user'
+    role TEXT NOT NULL DEFAULT 'user',
+    circle_wallet_id TEXT,
+    circle_wallet_address TEXT,
+    circle_wallet_blockchain TEXT
   );
 
   CREATE TABLE IF NOT EXISTS services (
@@ -78,7 +81,9 @@ sqlite.exec(`
     sms_messages TEXT,
     price TEXT NOT NULL,
     tellabot_request_id TEXT,
+    activation_id TEXT,
     tellabot_mdn TEXT,
+    cost_price TEXT,
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     completed_at TEXT
@@ -120,12 +125,44 @@ sqlite.exec(`
 
   -- Performance indexes
   CREATE INDEX IF NOT EXISTS idx_orders_user_status ON orders(user_id, status);
+  CREATE INDEX IF NOT EXISTS idx_orders_expires_status ON orders(expires_at, status);
   CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id);
   CREATE INDEX IF NOT EXISTS idx_crypto_deposits_user ON crypto_deposits(user_id);
   CREATE INDEX IF NOT EXISTS idx_crypto_deposits_status ON crypto_deposits(status);
   CREATE INDEX IF NOT EXISTS idx_crypto_deposits_unique_amount ON crypto_deposits(unique_amount, status);
   CREATE INDEX IF NOT EXISTS idx_crypto_deposits_trongrid_tx ON crypto_deposits(trongrid_tx_id);
 `);
+
+// Migrate: add Circle wallet columns to users
+try {
+  const userCols = sqlite.pragma("table_info(users)") as { name: string }[];
+  const userColNames = userCols.map((c) => c.name);
+  if (!userColNames.includes("circle_wallet_id")) {
+    sqlite.exec("ALTER TABLE users ADD COLUMN circle_wallet_id TEXT");
+  }
+  if (!userColNames.includes("circle_wallet_address")) {
+    sqlite.exec("ALTER TABLE users ADD COLUMN circle_wallet_address TEXT");
+  }
+  if (!userColNames.includes("circle_wallet_blockchain")) {
+    sqlite.exec("ALTER TABLE users ADD COLUMN circle_wallet_blockchain TEXT");
+  }
+} catch (err) {
+  console.error("User circle wallet migration failed (non-fatal):", err);
+}
+
+// Migrate: add activation_id/cost_price to orders
+try {
+  const orderCols = sqlite.pragma("table_info(orders)") as { name: string }[];
+  const orderColNames = orderCols.map((c) => c.name);
+  if (!orderColNames.includes("activation_id")) {
+    sqlite.exec("ALTER TABLE orders ADD COLUMN activation_id TEXT");
+  }
+  if (!orderColNames.includes("cost_price")) {
+    sqlite.exec("ALTER TABLE orders ADD COLUMN cost_price TEXT");
+  }
+} catch (err) {
+  console.error("Orders migration failed (non-fatal):", err);
+}
 
 // Migrate: rename stripe_session_id -> payment_ref for existing databases
 try {
@@ -210,6 +247,7 @@ export interface IStorage {
   createUser(user: { username: string; email: string; password: string }): Promise<User>;
   updateUserBalance(userId: number, balance: string): Promise<void>;
   updateUserPassword(userId: number, password: string): Promise<void>;
+  updateUserCircleWallet(userId: number, wallet: { id: string; address: string; blockchain: string }): Promise<void>;
   generateApiKey(userId: number): Promise<string>;
   getAllUsers(): Promise<User[]>;
 
@@ -247,6 +285,7 @@ export interface IStorage {
   getDepositPollTimestamp(): number;
   setDepositPollTimestamp(ts: number): void;
   expireStalePendingDeposits(): number;
+  expireStaleOrders(): Promise<number>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -277,6 +316,20 @@ export class DatabaseStorage implements IStorage {
 
   async updateUserPassword(userId: number, password: string): Promise<void> {
     db.update(users).set({ password }).where(eq(users.id, userId)).run();
+  }
+
+  async updateUserCircleWallet(
+    userId: number,
+    wallet: { id: string; address: string; blockchain: string },
+  ): Promise<void> {
+    db.update(users)
+      .set({
+        circleWalletId: wallet.id,
+        circleWalletAddress: wallet.address,
+        circleWalletBlockchain: wallet.blockchain,
+      })
+      .where(eq(users.id, userId))
+      .run();
   }
 
   async generateApiKey(userId: number): Promise<string> {
@@ -422,6 +475,16 @@ export class DatabaseStorage implements IStorage {
     const result = sqlite.prepare(
       "UPDATE crypto_deposits SET status = 'expired' WHERE status = 'pending' AND expires_at < ?"
     ).run(now);
+    return result.changes;
+  }
+
+  async expireStaleOrders(): Promise<number> {
+    const now = new Date().toISOString();
+    const result = sqlite
+      .prepare(
+        "UPDATE orders SET status = 'expired', completed_at = ? WHERE status IN ('waiting', 'received') AND expires_at < ?",
+      )
+      .run(now, now);
     return result.changes;
   }
 }
