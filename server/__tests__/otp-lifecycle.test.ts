@@ -98,8 +98,14 @@ describe("otp lifecycle with mocked tellabot/circle", () => {
       email: `otp-user-${random}@example.com`,
       password: "StrongPass123!",
     });
+    const me = await agent.get("/api/auth/me");
+    await storage.updateUserBalance(me.body.id, "5.00");
 
-    const buy = await agent.post("/api/buy-number").send({ service: "whatsapp" });
+    const buy = await agent
+      .post("/api/buy-number")
+      .set("Origin", "http://localhost:5000")
+      .set("Idempotency-Key", `otp-buy-${Date.now()}`)
+      .send({ service: "whatsapp" });
     expect(buy.status).toBe(200);
     expect(buy.body.phoneNumber).toContain("15550001111");
     expect(buy.body.orderId).toBeTypeOf("number");
