@@ -4,15 +4,19 @@ import helmet from "helmet";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { startTronPoller } from "./tronPoller";
-import { startCleanupJobs } from "./jobs/cleanup";
+import { startCleanupJobs, stopCleanupJobs } from "./jobs/cleanup";
 import { initFinancialSchema } from "./financial/core";
 import { financialIdempotencyMiddleware } from "./financial/idempotency";
 import { startReconciliationJob } from "./financial/reconciliation";
 import { createServer } from "http";
+import { scrubValue } from "./security/provider-scrub";
+import { toSafeErrorResponse } from "./security/errors";
 
 const app = express();
 const httpServer = createServer(app);
 const isProduction = process.env.NODE_ENV === "production";
+let inflightRequests = 0;
+let shuttingDown = false;
 
 // Respect reverse proxies (nginx / Cloudflare / host ingress) for real client IP and secure cookies.
 app.set("trust proxy", isProduction ? 1 : false);
@@ -118,14 +122,32 @@ export function log(message: string, source = "express") {
 }
 
 app.use((req, res, next) => {
+  inflightRequests += 1;
+  res.on("finish", () => {
+    inflightRequests = Math.max(0, inflightRequests - 1);
+  });
+
+  if (shuttingDown) {
+    return res.status(503).json({ message: "Service temporarily unavailable. Please try again." });
+  }
+
+  if (req.path.startsWith("/api")) {
+    res.setHeader("Cache-Control", "no-store");
+  }
+
+  // Hide infrastructure fingerprints.
+  res.removeHeader("X-Powered-By");
+  res.setHeader("Server", "getotps");
+
   const start = Date.now();
   const path = req.path;
   let capturedJsonResponse: Record<string, any> | undefined = undefined;
 
   const originalResJson = res.json;
   res.json = function (bodyJson, ...args) {
-    capturedJsonResponse = bodyJson;
-    return originalResJson.apply(res, [bodyJson, ...args]);
+    const sanitized = scrubValue(bodyJson);
+    capturedJsonResponse = sanitized as Record<string, any>;
+    return originalResJson.apply(res, [sanitized, ...args]);
   };
 
   res.on("finish", () => {
@@ -147,10 +169,9 @@ app.use((req, res, next) => {
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
-    const status = err.status || err.statusCode || 500;
-    const message = process.env.NODE_ENV === "production"
-      ? "Internal Server Error"
-      : (err.message || "Internal Server Error");
+    const mapped = toSafeErrorResponse(err);
+    const status = err.status || err.statusCode || mapped.status;
+    const message = mapped.message;
 
     console.error("Internal Server Error:", err);
 
@@ -158,7 +179,7 @@ app.use((req, res, next) => {
       return next(err);
     }
 
-    return res.status(status).json({ message });
+    return res.status(status).json({ message: scrubValue(message) });
   });
 
   // importantly only setup vite in development and after
@@ -191,4 +212,22 @@ app.use((req, res, next) => {
       startReconciliationJob();
     },
   );
+
+  const shutdown = () => {
+    shuttingDown = true;
+    stopCleanupJobs();
+    const start = Date.now();
+    httpServer.close(() => {
+      process.exit(0);
+    });
+    const interval = setInterval(() => {
+      if (inflightRequests === 0 || Date.now() - start > 30000) {
+        clearInterval(interval);
+        process.exit(0);
+      }
+    }, 250);
+  };
+
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
 })();

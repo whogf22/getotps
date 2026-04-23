@@ -11,7 +11,10 @@
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "test": "vitest run",
-    "db:push": "drizzle-kit push"
+    "db:push": "drizzle-kit push",
+    "check:leaks": "node scripts/check-leaks.js",
+    "check:live": "node scripts/check-live.js",
+    "deploy:purge": "node scripts/purge-cache.js"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

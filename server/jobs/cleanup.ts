@@ -56,6 +56,36 @@ export function startCleanupJobs(): void {
           orderIds: longPending.map((o) => o.id),
         });
       }
+
+      sqliteClient.prepare(
+        `UPDATE support_tickets
+         SET status = 'resolved', resolved_at = ?
+         WHERE status IN ('open', 'in_progress')
+           AND datetime(updated_at) < datetime('now', '-7 days')`,
+      ).run(new Date().toISOString());
+
+      const winBackCandidates = sqliteClient
+        .prepare(
+          `SELECT u.id
+           FROM users u
+           WHERE EXISTS (
+             SELECT 1 FROM orders o WHERE o.user_id = u.id AND datetime(o.created_at) >= datetime('now', '-90 days')
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM orders o2 WHERE o2.user_id = u.id AND datetime(o2.created_at) >= datetime('now', '-14 days')
+           )
+           AND (
+             u.win_back_sent_at IS NULL OR datetime(u.win_back_sent_at) < datetime('now', '-30 days')
+           )
+           LIMIT 100`,
+        )
+        .all() as Array<{ id: number }>;
+      for (const c of winBackCandidates) {
+        sqliteClient.prepare("UPDATE users SET win_back_sent_at = ? WHERE id = ?").run(new Date().toISOString(), c.id);
+        sqliteClient
+          .prepare("INSERT INTO win_back_events (user_id, sent_at, bonus_cents) VALUES (?, ?, ?)")
+          .run(c.id, new Date().toISOString(), Number(process.env.WINBACK_CREDIT_CENTS || 50));
+      }
     } catch (error) {
       log(`Cleanup job failed: ${String(error)}`, "cleanup");
       await sendFinancialAlert("critical", "cleanup_job_failure", { reason: String(error) });

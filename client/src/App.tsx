@@ -17,6 +17,9 @@ import History from "@/pages/History";
 import AddFunds from "@/pages/AddFunds";
 import ApiDocs from "@/pages/ApiDocs";
 import Profile from "@/pages/Profile";
+import ChangelogPage from "@/pages/Changelog";
+import SupportPage from "@/pages/Support";
+import FaqPage from "@/pages/Faq";
 import Terms from "@/pages/Terms";
 import Privacy from "@/pages/Privacy";
 import AdminOverview from "@/pages/admin/AdminOverview";
@@ -24,6 +27,7 @@ import AdminUsers from "@/pages/admin/AdminUsers";
 import AdminDeposits from "@/pages/admin/AdminDeposits";
 import AdminServices from "@/pages/admin/AdminServices";
 import { Skeleton } from "@/components/ui/skeleton";
+import { VersionBanner } from "@/components/VersionBanner";
 
 function ProtectedRoute({ component: Component }: { component: React.ComponentType }) {
   const { user, isLoading } = useAuth();
@@ -89,6 +93,9 @@ function AppRouter() {
       <Route path="/funds" component={() => <ProtectedRoute component={AddFunds} />} />
       <Route path="/api-docs" component={() => <ProtectedRoute component={ApiDocs} />} />
       <Route path="/profile" component={() => <ProtectedRoute component={Profile} />} />
+      <Route path="/changelog" component={() => <ProtectedRoute component={ChangelogPage} />} />
+      <Route path="/support" component={() => <ProtectedRoute component={SupportPage} />} />
+      <Route path="/faq" component={() => <ProtectedRoute component={FaqPage} />} />
       {/* Admin routes */}
       <Route path="/admin" component={() => <AdminRoute component={AdminOverview} />} />
       <Route path="/admin/users" component={() => <AdminRoute component={AdminUsers} />} />
@@ -106,6 +113,7 @@ function App() {
         <AuthProvider>
           <TooltipProvider>
             <Toaster />
+            <VersionBanner />
             <Router hook={useHashLocation}>
               <AppRouter />
             </Router>

@@ -28,7 +28,7 @@ export default function BuyNumber() {
 
   const buyMutation = useMutation({
     mutationFn: async (service: { id: number; slug: string }) => {
-      const tryCircleRoute = async () => {
+      const tryUnifiedRoute = async () => {
         const res = await apiRequest("POST", "/api/buy-number", { service: service.slug });
         return res.json();
       };
@@ -38,7 +38,7 @@ export default function BuyNumber() {
       };
 
       try {
-        return await tryCircleRoute();
+        return await tryUnifiedRoute();
       } catch {
         return await fallbackLegacyRoute();
       }

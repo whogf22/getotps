@@ -25,7 +25,7 @@ interface AdminStats {
   markupMultiplier: number;
   totalDeposited: string;
   pendingDeposits: number;
-  tellabotBalance: string;
+  smsProviderBalance: string;
 }
 
 export default function AdminOverview() {
@@ -78,7 +78,7 @@ export default function AdminOverview() {
                 {isLoading ? <Skeleton className="h-8 w-20" /> : (
                   <p className="text-2xl font-bold text-red-600 dark:text-red-400">${stats?.cost ?? "0.00"}</p>
                 )}
-                <p className="text-xs text-muted-foreground mt-1">Paid to TellaBot</p>
+                <p className="text-xs text-muted-foreground mt-1">Paid to SMS provider</p>
               </CardContent>
             </Card>
 
@@ -124,7 +124,7 @@ export default function AdminOverview() {
               { label: "Total Users", value: stats?.totalUsers ?? 0, icon: Users, color: "text-blue-500", bg: "bg-blue-500/10" },
               { label: "Total Orders", value: stats?.totalOrders ?? 0, icon: ShoppingCart, color: "text-green-500", bg: "bg-green-500/10" },
               { label: "Completed Orders", value: stats?.completedOrders ?? 0, icon: ShoppingCart, color: "text-cyan-500", bg: "bg-cyan-500/10" },
-              { label: "TellaBot Balance", value: stats?.tellabotBalance ?? "N/A", icon: Wallet, color: "text-purple-500", bg: "bg-purple-500/10" },
+              { label: "SMS Provider Balance", value: stats?.smsProviderBalance ?? "N/A", icon: Wallet, color: "text-purple-500", bg: "bg-purple-500/10" },
             ].map(kpi => (
               <Card key={kpi.label} className="border-border">
                 <CardContent className="p-4">

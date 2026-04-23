@@ -118,7 +118,7 @@ export default function AddFunds() {
     queryKey: ["/api/crypto/currencies"],
   });
 
-  const { data: circleWalletData, refetch: refetchCircleWallet } = useQuery<{
+  const { data: walletData, refetch: refetchWallet } = useQuery<{
     balanceUsdc: number;
     walletAddress?: string;
     blockchain?: string;
@@ -255,10 +255,10 @@ export default function AddFunds() {
 
         <Card className="border-border">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-semibold">USDC Wallet Deposit (Circle)</CardTitle>
+            <CardTitle className="text-sm font-semibold">USDC Wallet Deposit</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            {!circleWalletData?.walletAddress ? (
+            {!walletData?.walletAddress ? (
               <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between">
                 <p className="text-xs text-muted-foreground">
                   Create your dedicated USDC deposit wallet to pay for OTP purchases directly.
@@ -274,15 +274,15 @@ export default function AddFunds() {
             ) : (
               <>
                 <div className="text-xs text-muted-foreground">
-                  Network: <span className="font-medium text-foreground">{circleWalletData.blockchain || "Configured network"}</span>
+                  Network: <span className="font-medium text-foreground">{walletData.blockchain || "Configured network"}</span>
                 </div>
                 <div className="flex items-center gap-2 bg-muted/40 border border-border rounded-lg p-2">
-                  <code className="text-xs font-mono break-all flex-1">{circleWalletData.walletAddress}</code>
-                  <CopyButton text={circleWalletData.walletAddress} />
+                  <code className="text-xs font-mono break-all flex-1">{walletData.walletAddress}</code>
+                  <CopyButton text={walletData.walletAddress} />
                 </div>
                 <div className="flex items-center gap-3">
                   <img
-                    src={`https://api.qrserver.com/v1/create-qr-code/?size=96x96&data=${encodeURIComponent(circleWalletData.walletAddress)}`}
+                    src={`https://api.qrserver.com/v1/create-qr-code/?size=96x96&data=${encodeURIComponent(walletData.walletAddress)}`}
                     alt="Deposit wallet QR"
                     className="w-24 h-24 rounded border border-border"
                   />
@@ -290,9 +290,9 @@ export default function AddFunds() {
                     <p className="font-medium text-foreground mb-1">Send ONLY USDC on this network.</p>
                     <p>Wrong tokens or wrong networks may result in permanent loss of funds.</p>
                     <p className="mt-2">
-                      Balance: <span className="font-semibold text-foreground">{(circleWalletData.balanceUsdc || 0).toFixed(2)} USDC</span>
+                      Balance: <span className="font-semibold text-foreground">{(walletData.balanceUsdc || 0).toFixed(2)} USDC</span>
                     </p>
-                    <Button variant="ghost" size="sm" className="px-0 text-xs h-6" onClick={() => refetchCircleWallet()}>
+                    <Button variant="ghost" size="sm" className="px-0 text-xs h-6" onClick={() => refetchWallet()}>
                       Refresh wallet balance
                     </Button>
                   </div>
