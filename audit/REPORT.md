@@ -1,108 +1,73 @@
-# GetOTPs Production Re-Audit Report
+# GetOTPs Financial-Critical Audit Report
 
 Date: 2026-04-24  
-Branch: `auto/reaudit-fix-production-2026-04-24`
+Branch: `auto/financial-hardening-production-2026-04-24`
 
-## 1) Architecture Summary
+## 1) Full Repo Scan Summary
 
-- **Runtime/stack**
-  - Monorepo-style single package with:
-    - Express backend (`server/*`)
-    - React + Vite frontend (`client/*`)
-    - Shared schema/types (`shared/schema.ts`)
-  - TypeScript project (`type: module`) with esbuild production bundling.
-- **Package manager/scripts**
-  - npm with lockfile.
-  - Existing scripts: `dev`, `build`, `start`, `check`, `db:push`.
-  - No test/lint scripts currently wired.
-- **Database**
-  - SQLite (`better-sqlite3`) + Drizzle ORM.
-  - Schema is defined in `shared/schema.ts`.
-  - Runtime table creation/migrations are executed imperatively in `server/storage.ts`.
-  - No dedicated migration execution pipeline currently run at startup from `migrations/`.
-- **Auth/session**
-  - Cookie session auth with `express-session`, Passport Local.
-  - Session store is persistent SQLite via `better-sqlite3-session-store` (good).
-  - Cookies are `httpOnly`, `secure` in production, `sameSite=lax`.
-- **Security middleware**
-  - Helmet configured.
-  - Rate limiting via `express-rate-limit`.
-  - Error handling masks message in production responses but still logs server-side.
-  - No explicit CORS policy middleware.
-  - No CSRF guard on state-changing cookie-authenticated endpoints.
-- **Payments/deposits**
-  - Existing flow: crypto deposit intents and TronGrid-based USDT TRC20 auto-matching.
-  - Admin/manual confirmation endpoints for deposits.
-  - No Circle wallet integration yet.
-- **OTP order flow**
-  - Existing TellaBot integration is direct in routes and currently uses `api_command.php` + command pattern.
-  - Orders are created from service selection and balance deduction.
-  - OTP checks poll `read_sms`.
-  - Internal Tellabot IDs are currently persisted and some fields are returned in full order objects.
-- **Frontend**
-  - Hash-router SPA (`wouter`).
-  - User flows: landing, auth, dashboard, buy, active, funds, profile, admin.
-  - UX already includes loading and pending-state handling in core pages.
-- **Deployment**
-  - `deploy.sh` configures nginx reverse proxy + PM2 and standard `X-Forwarded-*` headers.
+- **Backend runtime**
+  - Express 5 + TypeScript (`server/index.ts`, `server/routes.ts`).
+  - SQLite (`better-sqlite3`) via Drizzle.
+  - Session auth with Passport + persistent SQLite session store.
+- **Frontend runtime**
+  - React + Vite + TypeScript + TanStack Query + wouter.
+  - Core money pages: `client/src/pages/AddFunds.tsx`, `BuyNumber.tsx`, `History.tsx`, `Dashboard.tsx`, admin deposit/user pages.
+- **Money-touching backend files**
+  - `server/routes.ts`: buy, cancel, deposit create/confirm, admin balance adjustments, API-key order flow.
+  - `server/storage.ts`: user balances, orders, transactions, crypto_deposits writes.
+  - `server/tronPoller.ts`: auto-confirm deposit credits.
+  - `server/jobs/cleanup.ts`: stale order expiry.
+  - `server/services/circle.service.ts`: Circle wallet and transfers.
+  - `server/services/tellabot.service.ts`: Tellabot provider calls.
+  - `server/services/pricing.service.ts`: server-side sell price.
+- **Data model**
+  - Main monetary fields currently stored as string decimals (not integer cents).
+  - Existing tables: `users`, `orders`, `transactions`, `crypto_deposits`.
+  - No immutable double-entry ledger tables yet.
 
-## 2) Security / Production Risks Identified
+## 2) Financial Flow Mapping (Current)
 
-### Critical
+1. **OTP buy flow (cookie auth route)**
+   - `POST /api/orders` and `POST /api/buy-number`
+   - Balance deductions and provider calls happen in app flow, but with mixed patterns and weak idempotency guarantees.
+2. **Deposit flow**
+   - `POST /api/crypto/create-deposit` creates pending records.
+   - `server/tronPoller.ts` auto-confirms and credits balances.
+   - Admin/manual completion endpoints can also credit.
+3. **Refund/cancel flow**
+   - `POST /api/orders/:id/cancel` and `POST /api/v1/order/:id/cancel` perform direct balance refunds.
+4. **Admin balance adjustments**
+   - `POST /api/admin/users/:id/add-balance` directly mutates balances.
+5. **Circle wallet flow**
+   - Wallet create/balance endpoints exist.
+   - OTP purchase can transfer Circle funds before order completion.
 
-1. **No CSRF protection for cookie-authenticated mutating routes**
-   - Endpoints like auth/logout, order create/cancel, profile/password, deposits can be cross-site targeted if browser sends cookies.
-2. **No strict origin policy/CORS middleware**
-   - App currently relies on same-origin behavior only; no explicit allowlist safeguards.
-3. **Tellabot API implementation and exposure concerns**
-   - Integration is in routes layer; no isolated service abstraction.
-   - Uses `api_command.php` pattern instead of required `handler_api.php` contract in target spec.
-   - Internal fields (`tellabotRequestId`, `tellabotMdn`) may leak through route payloads that return full order objects.
-4. **Provider idempotency gaps**
-   - Webhook-style idempotency handling framework is missing (especially for future Circle callbacks).
-   - Some multi-step external operations can duplicate under retries/races.
+## 3) Critical Financial Gaps
 
-### High
+1. **No immutable double-entry ledger**: financial integrity not provable.
+2. **No idempotency middleware**: duplicate charges/credits possible on retries.
+3. **No unified atomic debit/credit service**: direct balance mutations spread across routes/poller.
+4. **String-decimal money model**: rounding/precision risk.
+5. **No secure webhook framework**: no HMAC + timestamp replay defense.
+6. **No processed webhook dedupe table**: duplicate callback reprocessing risk.
+7. **No circuit breaker around Circle/Tellabot paths**: cascading provider failures possible.
+8. **No daily reconciliation job**: drift between balance, ledger intent, and providers undetected.
+9. **Pending timeout remediation partial**: stale expiry exists, but no full reverse/finalize decision engine.
+10. **No mandatory idempotency for financial POST routes**.
 
-5. **Stuck pending lifecycle**
-   - Order expiry logic exists via `expiresAt`, but no periodic job marks old waiting/received orders as `expired`.
-   - Pending deposits are expired, but confirming deposits can remain indefinitely.
-6. **Route-level validation inconsistent**
-   - Some endpoints validate strongly, others accept broad body shapes without schema validation.
-7. **Trust proxy configuration may be too narrow**
-   - Production sets `trust proxy=1`; can be insufficient in multi-hop setups behind Cloudflare + nginx chain.
+## 4) Upgrade/Plan Preservation Status
 
-### Medium
+- No standalone subscription engine was found in this repository.
+- Existing pricing and pay-per-use routes/UI remain present.
+- Financial hardening work will be additive and compatibility-preserving.
 
-8. **DB migration strategy is implicit/manual**
-   - Runtime `ALTER TABLE` checks are ad-hoc and hard to track.
-9. **API shape risk**
-   - Existing order response contracts include internal fields not always intended for user visibility.
-10. **No automated tests**
-   - No smoke tests for auth/order/deposit lifecycle.
+## 5) Execution Plan (Immediate)
 
-## 3) Business-Critical Feature Preservation Scan
-
-- **Upgrade/Plan/Subscription/Premium**
-  - No dedicated plan/subscription billing stack found in current codebase.
-  - Pricing exists as pay-per-use OTP service pricing and crypto balance top-up flow.
-  - Admin/user/account/payment/order functionality exists and must remain intact.
-  - Work will be additive and backward-compatible for all existing routes and behavior.
-
-## 4) Production Hardening Plan (Implementation Order)
-
-1. Add explicit trusted proxy strategy and robust IP extraction for rate limiting.
-2. Introduce CORS allowlist + strict same-origin CSRF guard for cookie-auth mutating routes.
-3. Add centralized env validation and safer startup requirements for production secrets.
-4. Add pending-state cleanup scheduler:
-   - expire waiting/received OTP orders after timeout
-   - expire stale deposits safely (pending + long-confirming timeout where appropriate)
-5. Refactor Tellabot into server-only service module using required `handler_api.php` actions and hidden internals.
-6. Add Circle dev-controlled wallets service and additive OTP purchase route:
-   - user wallet creation
-   - USDC balance fetch
-   - transfer user->master
-   - then upstream Tellabot number purchase
-7. Add DB additive schema fields/migration support for circle wallet and tellabot activation metadata.
-8. Add tests (auth smoke, OTP lifecycle with mocks, cleanup job behavior).
-9. Update docs: `.env.example`, `README.md`, `CHANGELOG.md`, `audit/FINAL_SUMMARY.md`.
+1. Add financial schema and migration layer (accounts, ledger, idempotency, webhooks, reconciliation).
+2. Introduce centralized money service with atomic lock-safe operations.
+3. Add financial idempotency middleware for all critical POST endpoints.
+4. Secure provider webhooks with HMAC + timestamp + dedupe.
+5. Wrap Circle/Tellabot integrations with circuit breaker and logging.
+6. Extend cleanup job to timeout, resolve, reverse, and alert.
+7. Add daily reconciliation and freeze-on-drift behavior.
+8. Add financial monitoring/alerts and required verification tests.
