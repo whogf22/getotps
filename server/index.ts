@@ -1,13 +1,32 @@
 import "dotenv/config";
 import express, { type Request, Response, NextFunction } from "express";
 import helmet from "helmet";
+import compression from "compression";
+import cors from "cors";
+import pinoHttp from "pino-http";
+import slowDown from "express-slow-down";
+import { randomUUID } from "node:crypto";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
-import { startTronPoller } from "./tronPoller";
+import { startTronPoller, stopTronPoller } from "./tronPoller";
+import { startCleanupJobs, stopCleanupJobs } from "./jobs/cleanup";
+import { initFinancialSchema } from "./financial/core";
+import { financialIdempotencyMiddleware } from "./financial/idempotency";
+import { startReconciliationJob, stopReconciliationJob } from "./financial/reconciliation";
 import { createServer } from "http";
+import { scrubValue } from "./security/provider-scrub";
+import { toSafeErrorResponse } from "./security/errors";
+import { logger } from "./logger";
+import { closePool } from "./db";
+import { closeRedis } from "./redis";
 
 const app = express();
 const httpServer = createServer(app);
+const isProduction = process.env.NODE_ENV === "production";
+let inflightRequests = 0;
+let shuttingDown = false;
+
+app.set("trust proxy", isProduction ? 1 : false);
 
 declare module "http" {
   interface IncomingMessage {
@@ -15,27 +34,85 @@ declare module "http" {
   }
 }
 
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
-      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-      fontSrc: ["'self'", "https://fonts.gstatic.com"],
-      imgSrc: ["'self'", "data:", "https:"],
-      connectSrc: ["'self'"],
-      frameSrc: ["'none'"],
-      objectSrc: ["'none'"],
-      baseUri: ["'self'"],
-      formAction: ["'self'"],
-      frameAncestors: ["'self'"],
-      scriptSrcAttr: ["'none'"],
-      upgradeInsecureRequests: [],
+if (isProduction) {
+  app.use((req, res, next) => {
+    if (process.env.ENFORCE_HTTPS === "false") return next();
+    const xfProto = req.headers["x-forwarded-proto"];
+    const secure = req.secure || xfProto === "https";
+    if (secure) return next();
+    const host = req.headers.host || "";
+    return res.redirect(301, `https://${host}${req.url}`);
+  });
+}
+
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'", "https://challenges.cloudflare.com"],
+        styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+        fontSrc: ["'self'", "https://fonts.gstatic.com"],
+        imgSrc: ["'self'", "data:", "https:"],
+        connectSrc: ["'self'"],
+        frameSrc: ["'self'", "https://challenges.cloudflare.com"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+        frameAncestors: ["'self'"],
+        scriptSrcAttr: ["'none'"],
+        ...(isProduction ? { upgradeInsecureRequests: [] as [] } : {}),
+      },
     },
-  },
-  referrerPolicy: { policy: "strict-origin-when-cross-origin" },
-  frameguard: { action: "deny" },
-}));
+    referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+    frameguard: { action: "deny" },
+  }),
+);
+
+app.use(compression());
+
+const allowedOrigins = new Set<string>(
+  [
+    process.env.FRONTEND_URL,
+    process.env.APP_URL,
+    ...(process.env.ALLOWED_ORIGINS || "").split(",").map((o) => o.trim()),
+    "http://localhost:5000",
+    "http://127.0.0.1:5000",
+  ].filter((o): o is string => Boolean(o)),
+);
+
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      if (allowedOrigins.has(origin)) return cb(null, true);
+      return cb(null, false);
+    },
+    credentials: true,
+    methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "X-CSRF-Token", "X-API-Key", "X-Request-Id"],
+  }),
+);
+
+app.use((req, res, next) => {
+  if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
+  if (!req.path.startsWith("/api")) return next();
+
+  const apiKeyHeader = req.headers["x-api-key"];
+  if (apiKeyHeader) return next();
+
+  const origin = req.headers.origin;
+  const referer = req.headers.referer;
+  if (!origin && !referer) return res.status(403).json({ message: "Blocked request origin" });
+
+  const candidate = origin || referer || "";
+  const matched = Array.from(allowedOrigins).some((allowed) => candidate.startsWith(allowed));
+  if (!matched) {
+    return res.status(403).json({ message: "Invalid request origin" });
+  }
+  return next();
+});
+
 app.use((_req, res, next) => {
   res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
   next();
@@ -50,65 +127,85 @@ app.use(
 );
 
 app.use(express.urlencoded({ extended: false }));
+app.use(financialIdempotencyMiddleware);
+
+if (process.env.NODE_ENV !== "test") {
+  app.use(
+    "/api",
+    slowDown({
+      windowMs: 60_000,
+      delayAfter: 120,
+      delayMs: () => 100,
+      maxDelayMs: 5000,
+    }),
+  );
+}
+
+app.use(
+  pinoHttp({
+    logger,
+    genReqId: (req) => (req.headers["x-request-id"] as string) || randomUUID(),
+    customLogLevel(_req, res, err) {
+      if (err || res.statusCode >= 500) return "error";
+      if (res.statusCode >= 400) return "warn";
+      return "info";
+    },
+  }),
+);
 
 export function log(message: string, source = "express") {
-  const formattedTime = new Date().toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: true,
-  });
-
-  console.log(`${formattedTime} [${source}] ${message}`);
+  logger.info({ source }, message);
 }
 
 app.use((req, res, next) => {
-  const start = Date.now();
-  const path = req.path;
-  let capturedJsonResponse: Record<string, any> | undefined = undefined;
+  inflightRequests += 1;
+  res.on("finish", () => {
+    inflightRequests = Math.max(0, inflightRequests - 1);
+  });
+
+  if (shuttingDown) {
+    return res.status(503).json({ message: "Service temporarily unavailable. Please try again." });
+  }
+
+  if (req.path.startsWith("/api")) {
+    res.setHeader("Cache-Control", "no-store");
+  }
+
+  res.removeHeader("X-Powered-By");
+  res.setHeader("Server", "getotps");
 
   const originalResJson = res.json;
   res.json = function (bodyJson, ...args) {
-    capturedJsonResponse = bodyJson;
-    return originalResJson.apply(res, [bodyJson, ...args]);
+    const sanitized = scrubValue(bodyJson);
+    return originalResJson.apply(res, [sanitized, ...args]);
   };
-
-  res.on("finish", () => {
-    const duration = Date.now() - start;
-    if (path.startsWith("/api")) {
-      let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
-      if (capturedJsonResponse && process.env.NODE_ENV !== "production") {
-        logLine += ` :: ${JSON.stringify(capturedJsonResponse).slice(0, 200)}`;
-      }
-
-      log(logLine);
-    }
-  });
 
   next();
 });
 
 (async () => {
+  await initFinancialSchema();
   await registerRoutes(httpServer, app);
 
-  app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
-    const status = err.status || err.statusCode || 500;
-    const message = process.env.NODE_ENV === "production"
-      ? "Internal Server Error"
-      : (err.message || "Internal Server Error");
+  app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+    const mapped = toSafeErrorResponse(err);
+    const status =
+      typeof err === "object" && err !== null && "status" in err
+        ? Number((err as { status?: number }).status)
+        : typeof err === "object" && err !== null && "statusCode" in err
+          ? Number((err as { statusCode?: number }).statusCode)
+          : mapped.status;
+    const message = mapped.message;
 
-    console.error("Internal Server Error:", err);
+    logger.error({ err }, "unhandled_error");
 
     if (res.headersSent) {
       return next(err);
     }
 
-    return res.status(status).json({ message });
+    return res.status(status).json({ message: scrubValue(message) });
   });
 
-  // importantly only setup vite in development and after
-  // setting up all the other routes so the catch-all route
-  // doesn't interfere with the other routes
   if (process.env.NODE_ENV === "production") {
     serveStatic(app);
   } else {
@@ -116,10 +213,6 @@ app.use((req, res, next) => {
     await setupVite(httpServer, app);
   }
 
-  // ALWAYS serve the app on the port specified in the environment variable PORT
-  // Other ports are firewalled. Default to 5000 if not specified.
-  // this serves both the API and the client.
-  // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || "5000", 10);
   httpServer.listen(
     {
@@ -128,10 +221,46 @@ app.use((req, res, next) => {
       reusePort: true,
     },
     () => {
-      log(`serving on port ${port}`);
-
-      // Start TronGrid USDT deposit poller
+      logger.info({ port }, "http_listen");
       startTronPoller();
+      startCleanupJobs();
+      startReconciliationJob();
     },
   );
+
+  let shutdownStarted = false;
+  const shutdown = (signal: string) => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
+    shuttingDown = true;
+    logger.info({ signal }, "graceful_shutdown_start");
+    stopCleanupJobs();
+    stopTronPoller();
+    stopReconciliationJob();
+
+    const deadline = Date.now() + 30_000;
+    const waitAndClose = () => {
+      if (inflightRequests === 0 || Date.now() >= deadline) {
+        if (inflightRequests > 0) {
+          logger.warn({ inflightRequests }, "shutdown_timeout_inflight");
+        }
+        httpServer.close((closeErr) => {
+          if (closeErr) logger.error({ err: closeErr }, "http_server_close");
+          void closePool()
+            .catch((e) => logger.error({ err: e }, "pool_close"))
+            .finally(() =>
+              void closeRedis()
+                .catch((e) => logger.error({ err: e }, "redis_close"))
+                .finally(() => process.exit(0)),
+            );
+        });
+        return;
+      }
+      setTimeout(waitAndClose, 250);
+    };
+    waitAndClose();
+  };
+
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 })();

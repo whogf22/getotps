@@ -21,7 +21,9 @@ import {
   ChevronLeft,
   ShieldCheck,
   Plus,
+  Bell,
 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 
 const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -29,6 +31,9 @@ const navItems = [
   { href: "/active", label: "Active Numbers", icon: Phone },
   { href: "/history", label: "History", icon: History },
   { href: "/funds", label: "Add Funds", icon: CreditCard },
+  { href: "/changelog", label: "Changelog", icon: Bell },
+  { href: "/support", label: "Support", icon: ShieldCheck },
+  { href: "/faq", label: "FAQ", icon: BookOpen },
   { href: "/profile", label: "Account", icon: User },
 ];
 
@@ -48,6 +53,12 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
   const { user, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const [location] = useLocation();
+  const { data: changelogItems } = useQuery<any[]>({
+    queryKey: ["/api/changelog"],
+    enabled: !!user,
+    refetchInterval: 60000,
+  });
+  const unreadCount = (changelogItems || []).filter((c) => !c.is_read).length;
 
   const handleLogout = async () => {
     await logout();
@@ -100,6 +111,11 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
               >
                 <Icon className="w-4 h-4 shrink-0" />
                 {!collapsed && <span>{label}</span>}
+                {!collapsed && href === "/changelog" && unreadCount > 0 && (
+                  <Badge variant="secondary" className="ml-auto text-[10px] px-1.5 py-0">
+                    {unreadCount}
+                  </Badge>
+                )}
               </a>
             </Link>
           );

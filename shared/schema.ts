@@ -11,6 +11,9 @@ export const users = sqliteTable("users", {
   balance: text("balance").notNull().default("0.00"),
   apiKey: text("api_key").unique(),
   role: text("role").notNull().default("user"),
+  circleWalletId: text("circle_wallet_id"),
+  circleWalletAddress: text("circle_wallet_address"),
+  circleWalletBlockchain: text("circle_wallet_blockchain"),
 });
 
 export const insertUserSchema = createInsertSchema(users).omit({ id: true, balance: true, apiKey: true, role: true });
@@ -44,7 +47,9 @@ export const orders = sqliteTable("orders", {
   smsMessages: text("sms_messages"), // JSON array of received SMS
   price: text("price").notNull(),
   tellabotRequestId: text("tellabot_request_id"), // TellaBot request ID
+  activationId: text("activation_id"), // upstream activation id (internal only)
   tellabotMdn: text("tellabot_mdn"), // raw MDN from TellaBot
+  costPrice: text("cost_price"), // upstream cost (internal)
   createdAt: text("created_at").notNull(),
   expiresAt: text("expires_at").notNull(),
   completedAt: text("completed_at"),

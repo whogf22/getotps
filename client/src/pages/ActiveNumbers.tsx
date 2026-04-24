@@ -73,7 +73,23 @@ export default function ActiveNumbers() {
   });
 
   const checkSmsMutation = useMutation({
-    mutationFn: async (orderId: number) => { const res = await apiRequest("POST", `/api/orders/${orderId}/check-sms`, {}); return res.json(); },
+    mutationFn: async (orderId: number) => {
+      const tryNewRoute = async () => {
+        const res = await fetch(`/api/check-sms/${orderId}`, { credentials: "include" });
+        if (!res.ok) throw new Error(await res.text());
+        return res.json();
+      };
+      const fallbackLegacyRoute = async () => {
+        const res = await apiRequest("POST", `/api/orders/${orderId}/check-sms`, {});
+        return res.json();
+      };
+
+      try {
+        return await tryNewRoute();
+      } catch {
+        return await fallbackLegacyRoute();
+      }
+    },
     onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/orders/active"] });
       queryClient.invalidateQueries({ queryKey: ["/api/orders"] });

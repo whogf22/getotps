@@ -118,6 +118,29 @@ export default function AddFunds() {
     queryKey: ["/api/crypto/currencies"],
   });
 
+  const { data: walletData, refetch: refetchWallet } = useQuery<{
+    balanceUsdc: number;
+    walletAddress?: string;
+    blockchain?: string;
+  }>({
+    queryKey: ["/api/wallet/balance"],
+    retry: false,
+  });
+
+  const createWalletMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/wallet/create", {});
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/wallet/balance"] });
+      toast({ title: "Wallet ready", description: "Your USDC deposit address has been created." });
+    },
+    onError: (err: any) => {
+      toast({ title: "Wallet error", description: err.message, variant: "destructive" });
+    },
+  });
+
   const { data: deposits } = useQuery<any[]>({
     queryKey: ["/api/crypto/deposits"],
     refetchInterval: 5000, // Poll frequently so auto-confirmed deposits update quickly
@@ -226,6 +249,55 @@ export default function AddFunds() {
                   </Button>
                 </a>
               </Link>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="border-border">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-semibold">USDC Wallet Deposit</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {!walletData?.walletAddress ? (
+              <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between">
+                <p className="text-xs text-muted-foreground">
+                  Create your dedicated USDC deposit wallet to pay for OTP purchases directly.
+                </p>
+                <Button
+                  size="sm"
+                  onClick={() => createWalletMutation.mutate()}
+                  disabled={createWalletMutation.isPending}
+                >
+                  {createWalletMutation.isPending ? "Creating..." : "Create Wallet"}
+                </Button>
+              </div>
+            ) : (
+              <>
+                <div className="text-xs text-muted-foreground">
+                  Network: <span className="font-medium text-foreground">{walletData.blockchain || "Configured network"}</span>
+                </div>
+                <div className="flex items-center gap-2 bg-muted/40 border border-border rounded-lg p-2">
+                  <code className="text-xs font-mono break-all flex-1">{walletData.walletAddress}</code>
+                  <CopyButton text={walletData.walletAddress} />
+                </div>
+                <div className="flex items-center gap-3">
+                  <img
+                    src={`https://api.qrserver.com/v1/create-qr-code/?size=96x96&data=${encodeURIComponent(walletData.walletAddress)}`}
+                    alt="Deposit wallet QR"
+                    className="w-24 h-24 rounded border border-border"
+                  />
+                  <div className="text-xs text-muted-foreground">
+                    <p className="font-medium text-foreground mb-1">Send ONLY USDC on this network.</p>
+                    <p>Wrong tokens or wrong networks may result in permanent loss of funds.</p>
+                    <p className="mt-2">
+                      Balance: <span className="font-semibold text-foreground">{(walletData.balanceUsdc || 0).toFixed(2)} USDC</span>
+                    </p>
+                    <Button variant="ghost" size="sm" className="px-0 text-xs h-6" onClick={() => refetchWallet()}>
+                      Refresh wallet balance
+                    </Button>
+                  </div>
+                </div>
+              </>
             )}
           </CardContent>
         </Card>
