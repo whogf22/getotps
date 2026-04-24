@@ -10,10 +10,13 @@ echo "Running Drizzle schema push (set DATABASE_URL)..."
 npx drizzle-kit push --force
 
 echo "Installing dependencies..."
-npm ci --omit=dev
+npm ci
 
 echo "Building client + server + worker..."
 npm run build
+
+echo "Pruning devDependencies..."
+npm prune --omit=dev
 
 echo "Checking for provider leaks..."
 npm run check:leaks
