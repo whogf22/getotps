@@ -2,12 +2,11 @@ import { beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import express from "express";
 import { createServer } from "http";
 import request from "supertest";
-import { rm } from "fs/promises";
 import crypto from "crypto";
 import { runFinancialReconciliation } from "../financial/reconciliation";
 import { assertTransactionBalanced, isFinancialFreezeEnabled, setFinancialFreeze } from "../financial/core";
 import { startCleanupJobs, stopCleanupJobs } from "../jobs/cleanup";
-import { sqliteClient } from "../storage";
+import { pool } from "../db";
 
 describe("financial hardening controls", () => {
   let app: express.Express;
@@ -18,7 +17,7 @@ describe("financial hardening controls", () => {
   beforeAll(async () => {
     process.env.NODE_ENV = "test";
     process.env.SESSION_SECRET = "financial-hardening-test-secret";
-    process.env.DATABASE_PATH = "./data.test.financial.db";
+    process.env.ADMIN_PASSWORD = "StrongAdminPass123!";
     process.env.TELLABOT_API_KEY = "tellabot-key";
     process.env.CIRCLE_API_KEY = "circle-key";
     process.env.CIRCLE_ENTITY_SECRET = "entity-secret";
@@ -29,7 +28,6 @@ describe("financial hardening controls", () => {
     process.env.CIRCLE_WEBHOOK_SECRET = "circle-webhook-secret";
     process.env.TELEGRAM_BOT_TOKEN = "bot-token";
     process.env.TELEGRAM_CHAT_ID = "chat-id";
-    await rm("./data.test.financial.db", { force: true });
 
     global.fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = String(input);
@@ -83,9 +81,6 @@ describe("financial hardening controls", () => {
 
     const storageModule = await import("../storage");
     storage = storageModule.storage;
-    await storage.upsertServices([
-      { name: "WhatsApp", slug: "whatsapp", price: "0.80", icon: null, category: "Messaging", isActive: 1 },
-    ]);
 
     app = express();
     app.use(
@@ -98,6 +93,10 @@ describe("financial hardening controls", () => {
     app.use(express.urlencoded({ extended: false }));
     const { registerRoutes } = await import("../routes");
     await registerRoutes(createServer(app), app);
+    // After registerRoutes (TellaBot sync may clear services with parallel test fetch mocks), restore catalog.
+    await storage.upsertServices([
+      { name: "WhatsApp", slug: "whatsapp", price: "0.80", icon: null, category: "Messaging", isActive: 1 },
+    ]);
   });
 
   beforeEach(() => {
@@ -108,12 +107,18 @@ describe("financial hardening controls", () => {
   async function registerAndFund(balance = "100.00") {
     const agent = request.agent(app);
     const random = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    const email = `fin-${random}@example.com`;
     const reg = await agent.post("/api/auth/register").send({
       username: `fin_${random}`,
-      email: `fin-${random}@example.com`,
+      email,
       password: "StrongPass123!",
     });
-    const userId = reg.body.id as number;
+    expect(reg.status).toBe(200);
+    const userId =
+      typeof reg.body?.id === "number"
+        ? (reg.body.id as number)
+        : (await storage.getUserByEmail(email))?.id;
+    if (!userId) throw new Error("registerAndFund: missing user id");
     await storage.updateUserBalance(userId, balance);
     return { agent, userId };
   }
@@ -227,26 +232,34 @@ describe("financial hardening controls", () => {
       .send({ service: "whatsapp" });
     expect(res.status).toBe(200);
 
-    const row = sqliteClient.prepare("SELECT id FROM financial_transactions ORDER BY id DESC LIMIT 1").get() as {
-      id: number;
-    };
-    expect(assertTransactionBalanced(row.id)).toBe(true);
+    const row = await pool.query<{ id: number }>(
+      "SELECT id FROM financial_transactions ORDER BY id DESC LIMIT 1",
+    );
+    const txId = row.rows[0]?.id;
+    expect(txId).toBeDefined();
+    expect(await assertTransactionBalanced(txId!)).toBe(true);
   });
 
   test("reconciliation mismatch triggers freeze and alert behavior", async () => {
-    sqliteClient.exec(
-      "UPDATE users SET balance_cents = balance_cents + 2, balance = printf('%.2f', (balance_cents + 2)/100.0) WHERE id IN (SELECT id FROM users LIMIT 1)",
+    await pool.query(
+      "UPDATE users SET balance_cents = balance_cents + 2 WHERE id = (SELECT id FROM users ORDER BY id ASC LIMIT 1)",
     );
     await runFinancialReconciliation();
-    expect(isFinancialFreezeEnabled()).toBe(true);
+    expect(await isFinancialFreezeEnabled()).toBe(true);
+    await setFinancialFreeze(false);
+    await pool.query(
+      "UPDATE users SET balance_cents = balance_cents - 2 WHERE id = (SELECT id FROM users ORDER BY id ASC LIMIT 1)",
+    );
   });
 
   test("cleanup job refunds stale pending order older than 10 minutes", async () => {
-    setFinancialFreeze(false);
+    await setFinancialFreeze(false);
     const { userId } = await registerAndFund("0.00");
+    const svc = await storage.getServiceBySlug("whatsapp");
+    if (!svc) throw new Error("missing whatsapp service");
     await storage.createOrder({
       userId,
-      serviceId: 1,
+      serviceId: svc.id,
       serviceName: "WhatsApp",
       phoneNumber: "+15555550101",
       status: "waiting",

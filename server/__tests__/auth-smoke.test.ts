@@ -2,7 +2,6 @@ import { beforeAll, describe, expect, test } from "vitest";
 import express from "express";
 import { createServer } from "http";
 import request from "supertest";
-import { rm } from "fs/promises";
 
 describe("auth flow smoke", () => {
   let app: express.Express;
@@ -10,8 +9,8 @@ describe("auth flow smoke", () => {
   beforeAll(async () => {
     process.env.NODE_ENV = "test";
     process.env.SESSION_SECRET = "test-session-secret";
-    process.env.DATABASE_PATH = "./data.test.auth.db";
-    await rm("./data.test.auth.db", { force: true });
+    process.env.JWT_SECRET = "test-jwt-secret";
+    process.env.ADMIN_PASSWORD = "StrongAdminPass123!";
 
     process.env.TELLABOT_API_KEY = "test";
     process.env.TELLABOT_USER = "test@example.com";

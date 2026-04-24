@@ -84,8 +84,7 @@ async function processTransfer(tx: TRC20Transaction): Promise<void> {
     return;
   }
 
-  // Replay check: reject if this tx was already used
-  if (storage.depositTxIdExists(txId)) {
+  if (await storage.depositTxIdExists(txId)) {
     return;
   }
 
@@ -114,19 +113,18 @@ async function processTransfer(tx: TRC20Transaction): Promise<void> {
 
   // Atomic: update deposit + credit balance + create transaction
   try {
-    runTransaction(() => {
-      // Re-check deposit status inside transaction to prevent double-credit
-      const txDeposit = syncDb.getCryptoDeposit(deposit.id);
+    await runTransaction(async () => {
+      const txDeposit = await syncDb.getCryptoDeposit(deposit.id);
       if (!txDeposit || txDeposit.status === "completed") return;
 
-      syncDb.updateCryptoDeposit(deposit.id, {
+      await syncDb.updateCryptoDeposit(deposit.id, {
         status: "completed",
         trongridTxId: txId,
         confirmedAmount: amountUsdt.toFixed(6),
         completedAt: now,
-      } as any);
+      });
     });
-    creditUser({
+    await creditUser({
       userId: deposit.userId,
       amountCents: parseAmountToCents(deposit.amount),
       idempotencyKey: `trongrid:${txId}`,
@@ -151,7 +149,7 @@ async function pollOnce(): Promise<void> {
     return; // Silently skip if not configured
   }
 
-  const lastTimestamp = storage.getDepositPollTimestamp();
+  const lastTimestamp = await storage.getDepositPollTimestamp();
 
   try {
     const transfers = await fetchTRC20Transfers(walletAddress, lastTimestamp);
@@ -174,16 +172,16 @@ async function pollOnce(): Promise<void> {
 
     // Update checkpoint
     if (maxTimestamp > lastTimestamp) {
-      storage.setDepositPollTimestamp(maxTimestamp);
+      await storage.setDepositPollTimestamp(maxTimestamp);
     }
   } catch (err) {
     log(`TronGrid poll error: ${err}`, "tron-poller");
   }
 }
 
-function expireDeposits(): void {
+async function expireDeposits(): Promise<void> {
   try {
-    const count = storage.expireStalePendingDeposits();
+    const count = await storage.expireStalePendingDeposits();
     if (count > 0) {
       log(`Expired ${count} stale pending deposit(s)`, "tron-poller");
     }
@@ -237,7 +235,7 @@ export function startTronPoller(): void {
   scheduleNext();
 
   // Expire stale deposits every 5 minutes
-  expiryInterval = setInterval(expireDeposits, 5 * 60 * 1000);
+  expiryInterval = setInterval(() => void expireDeposits(), 5 * 60 * 1000);
 }
 
 export function stopTronPoller(): void {

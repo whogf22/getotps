@@ -1,4 +1,4 @@
-import { sqliteClient } from "../storage";
+import { pool } from "../db";
 import { sendFinancialAlert } from "./alerts";
 import { logFinancialEvent } from "./logging";
 
@@ -14,37 +14,57 @@ type StateRow = {
   opened_at_ts: number | null;
 };
 
-function getState(provider: string): StateRow {
-  const row = sqliteClient
-    .prepare("SELECT state, failure_count, first_failure_ts, opened_at_ts FROM provider_circuit_state WHERE provider = ?")
-    .get(provider) as StateRow | undefined;
+async function getState(provider: string): Promise<StateRow> {
+  const res = await pool.query<StateRow>(
+    "SELECT state, failure_count, first_failure_ts, opened_at_ts FROM provider_circuit_state WHERE provider = $1",
+    [provider],
+  );
+  const row = res.rows[0];
   if (row) return row;
-  sqliteClient
-    .prepare(
-      "INSERT INTO provider_circuit_state (provider, state, failure_count, first_failure_ts, opened_at_ts, last_transition_at) VALUES (?, 'CLOSED', 0, NULL, NULL, ?)",
-    )
-    .run(provider, new Date().toISOString());
-  return { state: "CLOSED", failure_count: 0, first_failure_ts: null, opened_at_ts: null };
+  await pool.query(
+    `INSERT INTO provider_circuit_state (provider, state, failure_count, first_failure_ts, opened_at_ts, last_transition_at)
+     VALUES ($1, 'CLOSED', 0, NULL, NULL, $2)
+     ON CONFLICT (provider) DO NOTHING`,
+    [provider, new Date().toISOString()],
+  );
+  const again = await pool.query<StateRow>(
+    "SELECT state, failure_count, first_failure_ts, opened_at_ts FROM provider_circuit_state WHERE provider = $1",
+    [provider],
+  );
+  return (
+    again.rows[0] ?? { state: "CLOSED" as const, failure_count: 0, first_failure_ts: null, opened_at_ts: null }
+  );
 }
 
-function setState(provider: string, state: CircuitState, failureCount: number, firstFailureTs: number | null, openedAtTs: number | null): void {
-  sqliteClient
-    .prepare(
-      `UPDATE provider_circuit_state
-       SET state = ?, failure_count = ?, first_failure_ts = ?, opened_at_ts = ?, last_transition_at = ?
-       WHERE provider = ?`,
-    )
-    .run(state, failureCount, firstFailureTs, openedAtTs, new Date().toISOString(), provider);
+async function setState(
+  provider: string,
+  state: CircuitState,
+  failureCount: number,
+  firstFailureTs: number | null,
+  openedAtTs: number | null,
+): Promise<void> {
+  await pool.query(
+    `UPDATE provider_circuit_state
+     SET state = $1, failure_count = $2, first_failure_ts = $3, opened_at_ts = $4, last_transition_at = $5
+     WHERE provider = $6`,
+    [state, failureCount, firstFailureTs, openedAtTs, new Date().toISOString(), provider],
+  );
 }
 
-export async function guardedProviderCall<T>(provider: string, operationType: string, operation: () => Promise<T>, payloadForQueue?: Record<string, unknown>): Promise<T> {
+export async function guardedProviderCall<T>(
+  provider: string,
+  operationType: string,
+  operation: () => Promise<T>,
+  payloadForQueue?: Record<string, unknown>,
+): Promise<T> {
   const now = Date.now();
-  const state = getState(provider);
+  let state = await getState(provider);
 
   if (state.state === "OPEN") {
     if (state.opened_at_ts && now - state.opened_at_ts >= OPEN_TIMEOUT_MS) {
-      setState(provider, "HALF_OPEN", state.failure_count, state.first_failure_ts, state.opened_at_ts);
+      await setState(provider, "HALF_OPEN", state.failure_count, state.first_failure_ts, state.opened_at_ts);
       logFinancialEvent("circuit_transition", { provider, from: "OPEN", to: "HALF_OPEN", status: "state_change" });
+      state = await getState(provider);
     } else {
       if (payloadForQueue) {
         queueOperation(provider, operationType, payloadForQueue);
@@ -55,10 +75,10 @@ export async function guardedProviderCall<T>(provider: string, operationType: st
 
   try {
     const result = await operation();
-    setState(provider, "CLOSED", 0, null, null);
+    await setState(provider, "CLOSED", 0, null, null);
     return result;
   } catch (error) {
-    const current = getState(provider);
+    const current = await getState(provider);
     const firstFailureTs =
       current.first_failure_ts && now - current.first_failure_ts <= FAILURE_WINDOW_MS ? current.first_failure_ts : now;
     const failureCount =
@@ -73,7 +93,7 @@ export async function guardedProviderCall<T>(provider: string, operationType: st
       logFinancialEvent("circuit_transition", { provider, from: current.state, to: "OPEN", status: "state_change" });
     }
 
-    setState(provider, nextState, failureCount, firstFailureTs, openedAt);
+    await setState(provider, nextState, failureCount, firstFailureTs, openedAt);
     if (payloadForQueue) {
       queueOperation(provider, operationType, payloadForQueue);
     }
@@ -86,11 +106,12 @@ export function queueOperation(provider: string, operationType: string, payload:
   const nextRetryAt = new Date(Date.now() + delayMs).toISOString();
   const now = new Date().toISOString();
 
-  sqliteClient
-    .prepare(
+  void pool
+    .query(
       `INSERT INTO pending_operations
        (provider, operation_type, payload, retry_count, next_retry_at, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)`,
+       VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7)`,
+      [provider, operationType, JSON.stringify(payload), retryCount, nextRetryAt, now, now],
     )
-    .run(provider, operationType, JSON.stringify(payload), retryCount, nextRetryAt, now, now);
+    .catch((err: unknown) => console.error("queueOperation failed", err));
 }

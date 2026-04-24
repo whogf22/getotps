@@ -1,13 +1,10 @@
 import { beforeAll, describe, expect, test } from "vitest";
-import { rm } from "fs/promises";
 
 describe("pending cleanup jobs", () => {
-  let storage: any;
+  let storage: import("../storage").DatabaseStorage;
 
   beforeAll(async () => {
     process.env.NODE_ENV = "test";
-    process.env.DATABASE_PATH = "./data.test.cleanup.db";
-    await rm("./data.test.cleanup.db", { force: true });
     process.env.SESSION_SECRET = "cleanup-secret";
     process.env.ADMIN_PASSWORD = "StrongAdminPass123!";
 

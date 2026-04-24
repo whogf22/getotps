@@ -2,7 +2,6 @@ import { beforeAll, describe, expect, test, vi } from "vitest";
 import express from "express";
 import { createServer } from "http";
 import request from "supertest";
-import { rm } from "fs/promises";
 
 describe("otp lifecycle with mocked tellabot/circle", () => {
   let app: express.Express;
@@ -11,7 +10,7 @@ describe("otp lifecycle with mocked tellabot/circle", () => {
   beforeAll(async () => {
     process.env.NODE_ENV = "test";
     process.env.SESSION_SECRET = "test-session-secret";
-    process.env.DATABASE_PATH = "./data.test.otp.db";
+    process.env.ADMIN_PASSWORD = "StrongAdminPass123!";
     process.env.TELLABOT_API_KEY = "test-key";
     process.env.CIRCLE_API_KEY = "circle-key";
     process.env.CIRCLE_ENTITY_SECRET = "entity-secret";
@@ -19,7 +18,6 @@ describe("otp lifecycle with mocked tellabot/circle", () => {
     process.env.CIRCLE_USDC_TOKEN_ADDRESS = "0xUSDC";
     process.env.CIRCLE_MASTER_WALLET_ADDRESS = "0xMASTER";
     process.env.CIRCLE_WALLET_BLOCKCHAIN = "ETH-SEPOLIA";
-    await rm("./data.test.otp.db", { force: true });
 
     const fetchMock = vi.fn(async (input: string | URL) => {
       const url = String(input);
@@ -78,15 +76,15 @@ describe("otp lifecycle with mocked tellabot/circle", () => {
 
     const storageModule = await import("../storage");
     storage = storageModule.storage;
-    await storage.upsertServices([
-      { name: "WhatsApp", slug: "whatsapp", price: "0.50", icon: null, category: "Messaging", isActive: 1 },
-    ]);
 
     app = express();
     app.use(express.json());
     app.use(express.urlencoded({ extended: false }));
     const { registerRoutes } = await import("../routes");
     await registerRoutes(createServer(app), app);
+    await storage.upsertServices([
+      { name: "WhatsApp", slug: "whatsapp", price: "0.50", icon: null, category: "Messaging", isActive: 1 },
+    ]);
   });
 
   test("buy number and fetch sms code", async () => {

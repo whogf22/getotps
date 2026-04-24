@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { sqliteClient } from "../storage";
+import { pool } from "../db";
 
 export type FingerprintPayload = {
   userAgent: string;
@@ -36,27 +36,24 @@ export function computeFingerprintHash(payload: FingerprintPayload): string {
   return crypto.createHash("sha256").update(normalized).digest("hex");
 }
 
-function countFailedAttemptsInLastHour(email: string): number {
-  const row = sqliteClient
-    .prepare(
-      `SELECT COUNT(*) AS c
-       FROM login_events
-       WHERE email = ?
-         AND event_type = 'login_failed'
-         AND datetime(created_at) >= datetime('now', '-1 hour')`,
-    )
-    .get(email) as { c: number };
-  return row?.c ?? 0;
+async function countFailedAttemptsInLastHour(email: string): Promise<number> {
+  const r = await pool.query<{ c: string }>(
+    `SELECT COUNT(*)::text AS c FROM login_events
+     WHERE email = $1 AND event_type = 'login_failed'
+       AND created_at::timestamptz >= now() - interval '1 hour'`,
+    [email],
+  );
+  return Number(r.rows[0]?.c ?? 0);
 }
 
-export function assessRisk(params: {
+export async function assessRisk(params: {
   userId?: number | null;
   email: string;
   fingerprintHash: string;
   ipAddress: string;
   country: string;
   asn: string;
-}): RiskAssessment {
+}): Promise<RiskAssessment> {
   let score = 0;
   const reasons: string[] = [];
 
@@ -66,41 +63,41 @@ export function assessRisk(params: {
   }
 
   if (params.userId) {
-    const hasKnownFingerprint = sqliteClient
-      .prepare(
-        `SELECT 1 FROM login_events
-         WHERE user_id = ? AND fingerprint_hash = ?
-         LIMIT 1`,
-      )
-      .get(params.userId, params.fingerprintHash);
-    if (!hasKnownFingerprint) {
+    const fpRes = await pool.query(
+      `SELECT 1 FROM login_events
+       WHERE user_id = $1 AND fingerprint_hash = $2
+       LIMIT 1`,
+      [params.userId, params.fingerprintHash],
+    );
+    if (fpRes.rowCount === 0) {
       score += 20;
       reasons.push("new_device_fingerprint");
     }
 
-    const lastCountry = sqliteClient
-      .prepare(
-        `SELECT country FROM login_events
-         WHERE user_id = ?
-         ORDER BY id DESC
-         LIMIT 1`,
-      )
-      .get(params.userId) as { country?: string } | undefined;
+    const countryRes = await pool.query<{ country: string }>(
+      `SELECT country FROM login_events
+       WHERE user_id = $1
+       ORDER BY id DESC
+       LIMIT 1`,
+      [params.userId],
+    );
+    const lastCountry = countryRes.rows[0];
     if (lastCountry?.country && lastCountry.country !== params.country) {
       score += 15;
       reasons.push("country_changed");
     }
   }
 
-  const accountsFromFingerprint = sqliteClient
-    .prepare("SELECT COUNT(DISTINCT user_id) AS c FROM login_events WHERE fingerprint_hash = ? AND user_id IS NOT NULL")
-    .get(params.fingerprintHash) as { c: number };
-  if ((accountsFromFingerprint?.c ?? 0) >= 3) {
+  const multiRes = await pool.query<{ c: string }>(
+    "SELECT COUNT(DISTINCT user_id)::text AS c FROM login_events WHERE fingerprint_hash = $1 AND user_id IS NOT NULL",
+    [params.fingerprintHash],
+  );
+  if (Number(multiRes.rows[0]?.c ?? 0) >= 3) {
     score += 50;
     reasons.push("multi_account_fingerprint");
   }
 
-  const failedAttempts = countFailedAttemptsInLastHour(params.email);
+  const failedAttempts = await countFailedAttemptsInLastHour(params.email);
   if (failedAttempts > 0) {
     score += failedAttempts * 10;
     reasons.push("recent_failed_attempts");
@@ -115,7 +112,7 @@ export function assessRisk(params: {
   };
 }
 
-export function recordLoginEvent(params: {
+export async function recordLoginEvent(params: {
   userId?: number | null;
   email: string;
   eventType: "register" | "login_success" | "login_failed";
@@ -125,14 +122,12 @@ export function recordLoginEvent(params: {
   country: string;
   riskScore: number;
   reasons: string[];
-}): void {
-  sqliteClient
-    .prepare(
-      `INSERT INTO login_events (
-         user_id, email, event_type, fingerprint_hash, ip_address, asn, country, risk_score, reasons, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
+}): Promise<void> {
+  await pool.query(
+    `INSERT INTO login_events (
+       user_id, email, event_type, fingerprint_hash, ip_address, asn, country, risk_score, reasons, created_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [
       params.userId ?? null,
       params.email,
       params.eventType,
@@ -143,23 +138,23 @@ export function recordLoginEvent(params: {
       params.riskScore,
       JSON.stringify(params.reasons),
       new Date().toISOString(),
-    );
+    ],
+  );
 }
 
-export function getLinkedAccounts(userId: number): Array<{ id: number; username: string; email: string }> {
-  const rows = sqliteClient
-    .prepare(
-      `SELECT DISTINCT u.id, u.username, u.email
-       FROM users u
-       JOIN login_events le ON le.user_id = u.id
-       WHERE (
-         le.fingerprint_hash IN (
-           SELECT fingerprint_hash FROM login_events WHERE user_id = ?
-         ) OR le.ip_address IN (
-           SELECT ip_address FROM login_events WHERE user_id = ?
-         )
-       ) AND u.id != ?`,
-    )
-    .all(userId, userId, userId) as Array<{ id: number; username: string; email: string }>;
-  return rows;
+export async function getLinkedAccounts(userId: number): Promise<Array<{ id: number; username: string; email: string }>> {
+  const r = await pool.query<{ id: number; username: string; email: string }>(
+    `SELECT DISTINCT u.id, u.username, u.email
+     FROM users u
+     JOIN login_events le ON le.user_id = u.id
+     WHERE (
+       le.fingerprint_hash IN (
+         SELECT fingerprint_hash FROM login_events WHERE user_id = $1
+       ) OR le.ip_address IN (
+         SELECT ip_address FROM login_events WHERE user_id = $1
+       )
+     ) AND u.id != $2`,
+    [userId, userId],
+  );
+  return r.rows;
 }

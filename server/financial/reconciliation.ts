@@ -15,8 +15,8 @@ async function getTellabotSpentCents(): Promise<number> {
 }
 
 export async function runFinancialReconciliation(): Promise<void> {
-  const usersTotal = getUsersBalanceTotalCents();
-  const ledgerUserCash = getLedgerUserCashNetCents();
+  const usersTotal = await getUsersBalanceTotalCents();
+  const ledgerUserCash = await getLedgerUserCashNetCents();
   const mismatch = Math.abs(usersTotal - ledgerUserCash);
 
   const circleBalance = await getCircleMasterWalletBalanceCents();
@@ -30,14 +30,14 @@ export async function runFinancialReconciliation(): Promise<void> {
   };
 
   if (mismatch > ONE_CENT) {
-    setFinancialFreeze(true);
-    writeReconciliationLog("critical_mismatch", mismatch, details);
+    await setFinancialFreeze(true);
+    await writeReconciliationLog("critical_mismatch", mismatch, details);
     await sendFinancialAlert("critical", "reconciliation_mismatch", { mismatchCents: mismatch, ...details });
     return;
   }
 
-  setFinancialFreeze(false);
-  writeReconciliationLog("ok", mismatch, details);
+  await setFinancialFreeze(false);
+  await writeReconciliationLog("ok", mismatch, details);
 }
 
 let reconciliationInterval: ReturnType<typeof setInterval> | null = null;

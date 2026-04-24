@@ -82,6 +82,14 @@ export interface IStorage {
   createUser(user: { username: string; email: string; password: string }): Promise<User>;
   updateUserBalance(userId: number, balance: string): Promise<void>;
   updateUserPassword(userId: number, password: string): Promise<void>;
+  setUserEmailVerification(
+    userId: number,
+    data: { tokenHash: string; expiresAt: Date; sentAt: Date },
+  ): Promise<void>;
+  markUserEmailVerified(userId: number): Promise<void>;
+  setUserPasswordReset(userId: number, tokenHash: string, expiresAt: Date): Promise<void>;
+  getUserByPasswordResetTokenHash(tokenHash: string): Promise<User | undefined>;
+  clearUserPasswordReset(userId: number): Promise<void>;
   updateUserCircleWallet(userId: number, wallet: { id: string; address: string; blockchain: string }): Promise<void>;
   generateApiKey(userId: number): Promise<string>;
   getAllUsers(): Promise<User[]>;
@@ -188,6 +196,50 @@ export class DatabaseStorage implements IStorage {
 
   async updateUserPassword(userId: number, password: string): Promise<void> {
     await db.update(users).set({ password }).where(eq(users.id, userId));
+  }
+
+  async setUserEmailVerification(
+    userId: number,
+    data: { tokenHash: string; expiresAt: Date; sentAt: Date },
+  ): Promise<void> {
+    await db
+      .update(users)
+      .set({
+        emailVerifyTokenHash: data.tokenHash,
+        emailVerifyExpiresAt: data.expiresAt,
+        emailVerifySentAt: data.sentAt,
+      })
+      .where(eq(users.id, userId));
+  }
+
+  async markUserEmailVerified(userId: number): Promise<void> {
+    await db
+      .update(users)
+      .set({
+        emailVerified: true,
+        emailVerifyTokenHash: null,
+        emailVerifyExpiresAt: null,
+      })
+      .where(eq(users.id, userId));
+  }
+
+  async setUserPasswordReset(userId: number, tokenHash: string, expiresAt: Date): Promise<void> {
+    await db
+      .update(users)
+      .set({ passwordResetTokenHash: tokenHash, passwordResetExpiresAt: expiresAt })
+      .where(eq(users.id, userId));
+  }
+
+  async getUserByPasswordResetTokenHash(tokenHash: string): Promise<User | undefined> {
+    const rows = await db.select().from(users).where(eq(users.passwordResetTokenHash, tokenHash)).limit(1);
+    return rows[0];
+  }
+
+  async clearUserPasswordReset(userId: number): Promise<void> {
+    await db
+      .update(users)
+      .set({ passwordResetTokenHash: null, passwordResetExpiresAt: null })
+      .where(eq(users.id, userId));
   }
 
   async updateUserCircleWallet(

@@ -4,14 +4,14 @@ import { markWebhookProcessed } from "./core";
 
 const MAX_SKEW_SECONDS = 300;
 
-export function verifyWebhookSignature(params: {
+export async function verifyWebhookSignature(params: {
   provider: string;
   req: Request;
   secret: string;
   signatureHeader: string;
   timestampHeader: string;
   webhookIdHeader: string;
-}): { ok: true; webhookId: string; timestamp: number; duplicate: boolean } | { ok: false; reason: string } {
+}): Promise<{ ok: true; webhookId: string; timestamp: number; duplicate: boolean } | { ok: false; reason: string }> {
   const signature = params.req.header(params.signatureHeader);
   const timestampRaw = params.req.header(params.timestampHeader);
   const webhookId = params.req.header(params.webhookIdHeader);
@@ -41,6 +41,6 @@ export function verifyWebhookSignature(params: {
     return { ok: false, reason: "Invalid HMAC signature" };
   }
 
-  const inserted = markWebhookProcessed(params.provider, webhookId, timestamp);
+  const inserted = await markWebhookProcessed(params.provider, webhookId, timestamp);
   return { ok: true, webhookId, timestamp, duplicate: !inserted };
 }

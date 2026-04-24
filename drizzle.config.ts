@@ -1,10 +1,15 @@
 import { defineConfig } from "drizzle-kit";
 
+const url = process.env.DATABASE_URL;
+if (!url && process.env.CI) {
+  throw new Error("DATABASE_URL is required for drizzle-kit in CI");
+}
+
 export default defineConfig({
-  out: "./migrations",
   schema: "./shared/schema.ts",
-  dialect: "sqlite",
+  out: "./server/db/migrations",
+  dialect: "postgresql",
   dbCredentials: {
-    url: "./data.db",
+    url: url || "postgresql://127.0.0.1:5432/getotps_test",
   },
 });

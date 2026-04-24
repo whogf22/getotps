@@ -1,4 +1,4 @@
-import type { Express, Request, Response } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage, syncDb } from "./storage";
 import { pool, runTransaction, healthCheckDb } from "./db";
@@ -41,6 +41,9 @@ import { applyBuyAbuseProtection, recordAbuseEvent, trackApiKeyUse } from "./abu
 import { scrubValue, safeProviderNeutralMessage } from "./security/provider-scrub";
 import { readAppVersion } from "./security/version";
 import type { User } from "@shared/schema";
+import { randomBytes } from "node:crypto";
+import { sha256Hex, signEmailVerificationJwt, verifyEmailVerificationJwt } from "./auth-tokens";
+import { sendEmailVerificationMessage, sendPasswordResetMessage } from "./email";
 
 // Extend session type
 declare module "express-session" {
@@ -257,6 +260,13 @@ export async function registerRoutes(
     console.warn("WARNING: SESSION_SECRET not set. Using insecure default. Set it in .env for production!");
   }
 
+  if (!process.env.JWT_SECRET) {
+    if (isProduction) {
+      throw new Error("FATAL: JWT_SECRET must be set in production. Refusing to start with insecure default.");
+    }
+    console.warn("WARNING: JWT_SECRET not set. Using insecure default. Set it in .env for production!");
+  }
+
   app.use(
     session({
       store: new PgSession({
@@ -309,6 +319,14 @@ export async function registerRoutes(
     res.status(401).json({ message: "Unauthorized" });
   }
 
+  function requireVerifiedEmail(req: Request, res: Response, next: NextFunction) {
+    const u = req.user as User | undefined;
+    if (!u?.emailVerified) {
+      return res.status(403).json({ message: "Please verify your email before continuing." });
+    }
+    next();
+  }
+
   function requireAdmin(req: Request, res: Response, next: any) {
     if (req.isAuthenticated() && (req.user as any)?.role === "admin") return next();
     res.status(403).json({ message: "Forbidden" });
@@ -356,6 +374,19 @@ export async function registerRoutes(
     message: { message: "Too many order requests. Please slow down." },
   });
 
+  const resendVerificationLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 1,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => {
+      const r = req as Request & { user?: { id?: number } };
+      if (typeof r.user?.id === "number") return `resend-verify:${r.user.id}`;
+      return `resend-verify:ip:${ipKeyGenerator(req.ip || "127.0.0.1")}`;
+    },
+    message: { message: "You can resend verification once per minute." },
+  });
+
   // Apply general API limiter to all /api routes
   app.use("/api", apiLimiter);
 
@@ -383,6 +414,14 @@ export async function registerRoutes(
 
       const hashedPassword = await bcrypt.hash(password, 10);
       const user = await storage.createUser({ username, email, password: hashedPassword });
+      const verifyNonce = randomBytes(24).toString("hex");
+      const verifyJwt = signEmailVerificationJwt(user.id, verifyNonce);
+      await storage.setUserEmailVerification(user.id, {
+        tokenHash: sha256Hex(verifyNonce),
+        expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
+        sentAt: new Date(),
+      });
+      void sendEmailVerificationMessage({ to: user.email, verifyToken: verifyJwt }).catch(() => {});
       const fpPayload = extractFingerprintPayload(req);
       const fingerprintHash = computeFingerprintHash(fpPayload);
       const risk = await assessRisk({
@@ -430,6 +469,85 @@ export async function registerRoutes(
           }),
         );
       });
+    } catch (err: any) {
+      res.status(500).json({ message: safeError(err) });
+    }
+  });
+
+  app.post("/api/auth/verify-email", authLimiter, async (req, res) => {
+    try {
+      const token = String(req.body?.token || "");
+      if (!token) return res.status(400).json({ message: "Token required" });
+      let claims: ReturnType<typeof verifyEmailVerificationJwt>;
+      try {
+        claims = verifyEmailVerificationJwt(token);
+      } catch {
+        return res.status(400).json({ message: "Invalid or expired verification link" });
+      }
+      const row = await storage.getUser(claims.sub);
+      if (!row) return res.status(400).json({ message: "User not found" });
+      if (row.emailVerified) return res.json({ message: "Already verified" });
+      if (!row.emailVerifyTokenHash || !row.emailVerifyExpiresAt) {
+        return res.status(400).json({ message: "No pending verification" });
+      }
+      if (new Date(row.emailVerifyExpiresAt) < new Date()) {
+        return res.status(400).json({ message: "Verification link expired" });
+      }
+      if (row.emailVerifyTokenHash !== sha256Hex(claims.n)) {
+        return res.status(400).json({ message: "Invalid verification link" });
+      }
+      await storage.markUserEmailVerified(row.id);
+      res.json({ message: "Email verified" });
+    } catch (err: any) {
+      res.status(500).json({ message: safeError(err) });
+    }
+  });
+
+  const forgotPasswordResponse = {
+    message: "If an account exists for that email, you will receive reset instructions.",
+  };
+
+  app.post("/api/auth/forgot-password", authLimiter, async (req, res) => {
+    try {
+      const email = String(req.body?.email || "").trim();
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.json(forgotPasswordResponse);
+      }
+      const user = await storage.getUserByEmail(email);
+      if (!user) return res.json(forgotPasswordResponse);
+      const raw = randomBytes(32).toString("hex");
+      const hash = sha256Hex(raw);
+      await storage.setUserPasswordReset(user.id, hash, new Date(Date.now() + 60 * 60 * 1000));
+      void sendPasswordResetMessage({ to: user.email, resetToken: `${user.id}|${raw}` }).catch(() => {});
+      return res.json(forgotPasswordResponse);
+    } catch (err: any) {
+      res.status(500).json({ message: safeError(err) });
+    }
+  });
+
+  app.post("/api/auth/reset-password", authLimiter, async (req, res) => {
+    try {
+      const token = String(req.body?.token || "");
+      const newPassword = String(req.body?.password || "");
+      if (!token || !newPassword) return res.status(400).json({ message: "Token and password required" });
+      if (newPassword.length < 8) {
+        return res.status(400).json({ message: "Password must be at least 8 characters" });
+      }
+      const pipe = token.indexOf("|");
+      if (pipe < 1) return res.status(400).json({ message: "Invalid token" });
+      const userId = Number(token.slice(0, pipe));
+      const raw = token.slice(pipe + 1);
+      if (!Number.isFinite(userId) || raw.length < 16) return res.status(400).json({ message: "Invalid token" });
+      const hash = sha256Hex(raw);
+      const user = await storage.getUserByPasswordResetTokenHash(hash);
+      if (!user || user.id !== userId) return res.status(400).json({ message: "Invalid or expired reset link" });
+      if (!user.passwordResetExpiresAt || new Date(user.passwordResetExpiresAt) < new Date()) {
+        return res.status(400).json({ message: "Invalid or expired reset link" });
+      }
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      await storage.updateUserPassword(user.id, hashedPassword);
+      await storage.clearUserPasswordReset(user.id);
+      res.json({ message: "Password updated" });
     } catch (err: any) {
       res.status(500).json({ message: safeError(err) });
     }
@@ -521,6 +639,24 @@ export async function registerRoutes(
     if (!freshUser) return res.status(404).json({ message: "User not found" });
     const { password: _, apiKey: __, ...safeUser } = freshUser;
     res.json(safeUser);
+  });
+
+  app.post("/api/auth/resend-verification", requireAuth, resendVerificationLimiter, async (req, res) => {
+    try {
+      const user = req.user as User;
+      if (user.emailVerified) return res.status(400).json({ message: "Email already verified" });
+      const verifyNonce = randomBytes(24).toString("hex");
+      const verifyJwt = signEmailVerificationJwt(user.id, verifyNonce);
+      await storage.setUserEmailVerification(user.id, {
+        tokenHash: sha256Hex(verifyNonce),
+        expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
+        sentAt: new Date(),
+      });
+      await sendEmailVerificationMessage({ to: user.email, verifyToken: verifyJwt }).catch(() => {});
+      res.json({ message: "Verification email sent" });
+    } catch (err: any) {
+      res.status(500).json({ message: safeError(err) });
+    }
   });
 
   // ========== CIRCLE WALLET ==========
@@ -799,7 +935,7 @@ export async function registerRoutes(
 
   // ========== ORDERS (TellaBot-backed) ==========
 
-  app.post("/api/orders", requireAuth, orderLimiter, async (req, res) => {
+  app.post("/api/orders", requireAuth, requireVerifiedEmail, orderLimiter, async (req, res) => {
     try {
       const user = req.user as any;
       const { serviceId, serviceName } = req.body;
@@ -1107,7 +1243,7 @@ export async function registerRoutes(
     return fallback.toFixed(6);
   }
 
-  app.post("/api/crypto/create-deposit", requireAuth, async (req, res) => {
+  app.post("/api/crypto/create-deposit", requireAuth, requireVerifiedEmail, async (req, res) => {
     try {
       const user = req.user as any;
       const { currency, amount } = req.body;
