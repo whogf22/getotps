@@ -18,6 +18,7 @@ import {
   apiPlans,
   serviceBundles,
   userBundleCredits,
+  auditLogs,
 } from "@shared/schema";
 import { eq, and, desc, or, sql, gt } from "drizzle-orm";
 import bcrypt from "bcryptjs";
@@ -142,6 +143,15 @@ export interface IStorage {
     createdAt: string;
   }): Promise<void>;
   setUserAnnualBadge(userId: number, annualBadge: boolean): Promise<void>;
+
+  insertAuditLog(row: {
+    userId?: number | null;
+    adminId?: number | null;
+    action: string;
+    meta?: unknown;
+    ip?: string | null;
+    userAgent?: string | null;
+  }): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -501,6 +511,24 @@ export class DatabaseStorage implements IStorage {
 
   async setUserAnnualBadge(userId: number, annualBadge: boolean) {
     await db.update(users).set({ annualBadge }).where(eq(users.id, userId));
+  }
+
+  async insertAuditLog(row: {
+    userId?: number | null;
+    adminId?: number | null;
+    action: string;
+    meta?: unknown;
+    ip?: string | null;
+    userAgent?: string | null;
+  }): Promise<void> {
+    await db.insert(auditLogs).values({
+      userId: row.userId ?? null,
+      adminId: row.adminId ?? null,
+      action: row.action,
+      meta: row.meta ?? null,
+      ip: row.ip ?? null,
+      userAgent: row.userAgent ?? null,
+    });
   }
 }
 

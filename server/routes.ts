@@ -44,6 +44,17 @@ import type { User } from "@shared/schema";
 import { randomBytes } from "node:crypto";
 import { sha256Hex, signEmailVerificationJwt, verifyEmailVerificationJwt } from "./auth-tokens";
 import { sendEmailVerificationMessage, sendPasswordResetMessage } from "./email";
+import { writeAudit } from "./audit";
+import { verifyTurnstile } from "./turnstile";
+import { validateBody } from "./middleware/validate";
+import {
+  registerBodySchema,
+  loginBodySchema,
+  forgotPasswordBodySchema,
+  resetPasswordBodySchema,
+  verifyEmailBodySchema,
+  createDepositBodySchema,
+} from "@shared/validators";
 
 // Extend session type
 declare module "express-session" {
@@ -392,21 +403,18 @@ export async function registerRoutes(
 
   // ========== AUTH ROUTES ==========
 
-  app.post("/api/auth/register", authLimiter, async (req, res) => {
+  app.post(
+    "/api/auth/register",
+    authLimiter,
+    verifyTurnstile(),
+    validateBody(registerBodySchema),
+    async (req, res) => {
     try {
-      const { username, email, password } = req.body;
-      if (!username || !email || !password) {
-        return res.status(400).json({ message: "All fields required" });
-      }
-      if (password.length < 8) {
-        return res.status(400).json({ message: "Password must be at least 8 characters" });
-      }
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        return res.status(400).json({ message: "Invalid email format" });
-      }
-      if (username.length < 3 || username.length > 32 || !/^[a-zA-Z0-9_-]+$/.test(username)) {
-        return res.status(400).json({ message: "Username must be 3-32 characters (letters, numbers, _ or -)" });
-      }
+      const { username, email, password } = req.body as {
+        username: string;
+        email: string;
+        password: string;
+      };
       const existing = await storage.getUserByEmail(email);
       if (existing) return res.status(400).json({ message: "Email already registered" });
       const existingUsername = await storage.getUserByUsername(username);
@@ -455,6 +463,7 @@ export async function registerRoutes(
 
       req.login(user, async (err) => {
         if (err) return res.status(500).json({ message: "Login failed after registration" });
+        await writeAudit(req, "register", { email }, user.id);
         const { password: _, apiKey: __, ...safeUser } = user;
         const linkedAccounts = await getLinkedAccounts(user.id);
         return res.json(
@@ -474,9 +483,9 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/auth/verify-email", authLimiter, async (req, res) => {
+  app.post("/api/auth/verify-email", authLimiter, validateBody(verifyEmailBodySchema), async (req, res) => {
     try {
-      const token = String(req.body?.token || "");
+      const token = String((req.body as { token: string }).token || "");
       if (!token) return res.status(400).json({ message: "Token required" });
       let claims: ReturnType<typeof verifyEmailVerificationJwt>;
       try {
@@ -497,6 +506,7 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Invalid verification link" });
       }
       await storage.markUserEmailVerified(row.id);
+      await writeAudit(req, "email_verified", { email: row.email }, row.id);
       res.json({ message: "Email verified" });
     } catch (err: any) {
       res.status(500).json({ message: safeError(err) });
@@ -507,10 +517,15 @@ export async function registerRoutes(
     message: "If an account exists for that email, you will receive reset instructions.",
   };
 
-  app.post("/api/auth/forgot-password", authLimiter, async (req, res) => {
+  app.post(
+    "/api/auth/forgot-password",
+    authLimiter,
+    verifyTurnstile(),
+    validateBody(forgotPasswordBodySchema),
+    async (req, res) => {
     try {
-      const email = String(req.body?.email || "").trim();
-      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      const email = String((req.body as { email: string }).email || "").trim();
+      if (!email) {
         return res.json(forgotPasswordResponse);
       }
       const user = await storage.getUserByEmail(email);
@@ -519,16 +534,17 @@ export async function registerRoutes(
       const hash = sha256Hex(raw);
       await storage.setUserPasswordReset(user.id, hash, new Date(Date.now() + 60 * 60 * 1000));
       void sendPasswordResetMessage({ to: user.email, resetToken: `${user.id}|${raw}` }).catch(() => {});
+      await writeAudit(req, "password_reset", { stage: "requested", email }, user.id);
       return res.json(forgotPasswordResponse);
     } catch (err: any) {
       res.status(500).json({ message: safeError(err) });
     }
   });
 
-  app.post("/api/auth/reset-password", authLimiter, async (req, res) => {
+  app.post("/api/auth/reset-password", authLimiter, validateBody(resetPasswordBodySchema), async (req, res) => {
     try {
-      const token = String(req.body?.token || "");
-      const newPassword = String(req.body?.password || "");
+      const token = String((req.body as { token: string }).token || "");
+      const newPassword = String((req.body as { password: string }).password || "");
       if (!token || !newPassword) return res.status(400).json({ message: "Token and password required" });
       if (newPassword.length < 8) {
         return res.status(400).json({ message: "Password must be at least 8 characters" });
@@ -547,13 +563,14 @@ export async function registerRoutes(
       const hashedPassword = await bcrypt.hash(newPassword, 10);
       await storage.updateUserPassword(user.id, hashedPassword);
       await storage.clearUserPasswordReset(user.id);
+      await writeAudit(req, "password_reset", { stage: "completed" }, user.id);
       res.json({ message: "Password updated" });
     } catch (err: any) {
       res.status(500).json({ message: safeError(err) });
     }
   });
 
-  app.post("/api/auth/login", authLimiter, (req, res, next) => {
+  app.post("/api/auth/login", authLimiter, verifyTurnstile(), validateBody(loginBodySchema), (req, res, next) => {
     passport.authenticate("local", (err: unknown, user: false | User | undefined, _info: { message?: string }) => {
       void (async () => {
         if (err) return res.status(500).json({ message: safeError(err) });
@@ -612,6 +629,7 @@ export async function registerRoutes(
         }
         req.login(user, (loginErr) => {
           if (loginErr) return res.status(500).json({ message: "Login failed" });
+          void writeAudit(req, "login", { email: String(user.email) }, user.id as number);
           const { password: _, apiKey: __, ...safeUser } = user;
           return res.json(
             scrubValue({
@@ -630,7 +648,11 @@ export async function registerRoutes(
   });
 
   app.post("/api/auth/logout", (req, res) => {
-    req.logout(() => { res.json({ message: "Logged out" }); });
+    const uid = (req.user as { id: number } | undefined)?.id;
+    req.logout(async () => {
+      if (uid != null) await writeAudit(req, "logout", {}, uid);
+      res.json({ message: "Logged out" });
+    });
   });
 
   app.get("/api/auth/me", requireAuth, async (req, res) => {
@@ -1243,10 +1265,16 @@ export async function registerRoutes(
     return fallback.toFixed(6);
   }
 
-  app.post("/api/crypto/create-deposit", requireAuth, requireVerifiedEmail, async (req, res) => {
+  app.post(
+    "/api/crypto/create-deposit",
+    requireAuth,
+    requireVerifiedEmail,
+    verifyTurnstile(),
+    validateBody(createDepositBodySchema),
+    async (req, res) => {
     try {
       const user = req.user as any;
-      const { currency, amount } = req.body;
+      const { currency, amount } = req.body as { currency: string; amount: string };
       if (!currency || !amount) return res.status(400).json({ message: "Currency and amount are required" });
       const usdAmount = parseFloat(amount);
       if (isNaN(usdAmount) || usdAmount < 1) return res.status(400).json({ message: "Minimum deposit is $1.00" });
@@ -1272,6 +1300,7 @@ export async function registerRoutes(
         status: "pending",
         createdAt: now.toISOString(), expiresAt: expiresAt.toISOString(), completedAt: null,
       });
+      await writeAudit(req, "deposit_create", { depositId: deposit.id, currency, amount: usdAmount.toFixed(2) });
       res.json(deposit);
     } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
   });
