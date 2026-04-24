@@ -38,7 +38,8 @@ export function scrubValue<T>(value: T): T {
         lowered.includes("cost_price") ||
         lowered.includes("costprice") ||
         lowered.includes("tellabot") ||
-        lowered.includes("circle")
+        lowered.includes("circle") ||
+        lowered.includes("totp_secret")
       ) {
         continue;
       }

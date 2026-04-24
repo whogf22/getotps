@@ -15,8 +15,17 @@ export const registerBodySchema = z.object({
 export const loginBodySchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
+  totpCode: z.string().regex(/^\d{6}$/).optional(),
   cfTurnstileResponse: z.string().optional(),
   turnstileToken: z.string().optional(),
+});
+
+export const admin2faVerifyBodySchema = z.object({
+  token: z.string().regex(/^\d{6}$/),
+});
+
+export const admin2faDisableBodySchema = z.object({
+  token: z.string().regex(/^\d{6}$/),
 });
 
 export const forgotPasswordBodySchema = z.object({

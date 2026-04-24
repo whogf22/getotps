@@ -91,6 +91,8 @@ export interface IStorage {
   setUserPasswordReset(userId: number, tokenHash: string, expiresAt: Date): Promise<void>;
   getUserByPasswordResetTokenHash(tokenHash: string): Promise<User | undefined>;
   clearUserPasswordReset(userId: number): Promise<void>;
+  setUserAdminTotpSecret(userId: number, secret: string | null): Promise<void>;
+  setUserAdminTotpEnabled(userId: number, enabled: boolean): Promise<void>;
   updateUserCircleWallet(userId: number, wallet: { id: string; address: string; blockchain: string }): Promise<void>;
   generateApiKey(userId: number): Promise<string>;
   getAllUsers(): Promise<User[]>;
@@ -250,6 +252,14 @@ export class DatabaseStorage implements IStorage {
       .update(users)
       .set({ passwordResetTokenHash: null, passwordResetExpiresAt: null })
       .where(eq(users.id, userId));
+  }
+
+  async setUserAdminTotpSecret(userId: number, secret: string | null): Promise<void> {
+    await db.update(users).set({ adminTotpSecret: secret }).where(eq(users.id, userId));
+  }
+
+  async setUserAdminTotpEnabled(userId: number, enabled: boolean): Promise<void> {
+    await db.update(users).set({ adminTotpEnabled: enabled }).where(eq(users.id, userId));
   }
 
   async updateUserCircleWallet(

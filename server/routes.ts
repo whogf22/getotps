@@ -8,6 +8,8 @@ import connectPgSimple from "connect-pg-simple";
 import passport from "passport";
 import { Strategy as LocalStrategy } from "passport-local";
 import bcrypt from "bcryptjs";
+import speakeasy from "speakeasy";
+import QRCode from "qrcode";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import {
   buyNumberFromTellabot,
@@ -54,6 +56,8 @@ import {
   resetPasswordBodySchema,
   verifyEmailBodySchema,
   createDepositBodySchema,
+  admin2faVerifyBodySchema,
+  admin2faDisableBodySchema,
 } from "@shared/validators";
 
 // Extend session type
@@ -302,17 +306,35 @@ export async function registerRoutes(
   app.use(passport.session());
 
   passport.use(
-    new LocalStrategy({ usernameField: "email" }, async (email, password, done) => {
-      try {
-        const user = await storage.getUserByEmail(email);
-        if (!user) return done(null, false, { message: "Invalid email or password" });
-        const isValid = await bcrypt.compare(password, user.password);
-        if (!isValid) return done(null, false, { message: "Invalid email or password" });
-        return done(null, user);
-      } catch (err) {
-        return done(err);
-      }
-    })
+    new LocalStrategy(
+      { usernameField: "email", passwordField: "password", passReqToCallback: true },
+      async (req, email, password, done) => {
+        try {
+          const user = await storage.getUserByEmail(email);
+          if (!user) return done(null, false, { message: "Invalid email or password" });
+          const isValid = await bcrypt.compare(password, user.password);
+          if (!isValid) return done(null, false, { message: "Invalid email or password" });
+
+          if (user.role === "admin" && user.adminTotpEnabled && user.adminTotpSecret) {
+            const code = String((req.body as { totpCode?: string })?.totpCode ?? "").trim();
+            if (!code) {
+              return done(null, false, { message: "This account requires an authenticator code." });
+            }
+            const ok = speakeasy.totp.verify({
+              secret: user.adminTotpSecret,
+              encoding: "base32",
+              token: code,
+              window: 1,
+            });
+            if (!ok) return done(null, false, { message: "Invalid authenticator code" });
+          }
+
+          return done(null, user);
+        } catch (err) {
+          return done(err);
+        }
+      },
+    ),
   );
 
   passport.serializeUser((user: any, done) => done(null, user.id));
@@ -341,6 +363,35 @@ export async function registerRoutes(
   function requireAdmin(req: Request, res: Response, next: any) {
     if (req.isAuthenticated() && (req.user as any)?.role === "admin") return next();
     res.status(403).json({ message: "Forbidden" });
+  }
+
+  /** When admin TOTP is enabled, require `x-admin-totp` header, body.adminTotp, or body.token (6-digit). */
+  function requireAdmin2FAIfEnabled(req: Request, res: Response, next: NextFunction) {
+    const u = req.user as User | undefined;
+    if (!u || u.role !== "admin") {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+    if (!u.adminTotpEnabled || !u.adminTotpSecret) {
+      return next();
+    }
+    const hdr = String(req.get("x-admin-totp") ?? "").trim();
+    const bodyObj = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
+    const bodyTotp = typeof bodyObj.adminTotp === "string" ? bodyObj.adminTotp.trim() : "";
+    const bodyToken = typeof bodyObj.token === "string" ? bodyObj.token.trim() : "";
+    const token = hdr || bodyTotp || (/^\d{6}$/.test(bodyToken) ? bodyToken : "");
+    if (!token) {
+      return res.status(403).json({ message: "Admin TOTP required", code: "ADMIN_TOTP_REQUIRED" });
+    }
+    const ok = speakeasy.totp.verify({
+      secret: u.adminTotpSecret,
+      encoding: "base32",
+      token,
+      window: 1,
+    });
+    if (!ok) {
+      return res.status(403).json({ message: "Invalid authenticator code" });
+    }
+    return next();
   }
 
   function sanitizeOrderForClient(order: any) {
@@ -1358,7 +1409,91 @@ export async function registerRoutes(
     } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
   });
 
-  app.post("/api/admin/crypto/:id/confirm", requireAdmin, async (req, res) => {
+  // ========== ADMIN 2FA ==========
+  app.post("/api/admin/2fa/setup", requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const admin = req.user as User;
+      const fresh = await storage.getUser(admin.id);
+      if (!fresh || fresh.role !== "admin") return res.status(403).json({ message: "Forbidden" });
+      if (fresh.adminTotpEnabled) {
+        return res
+          .status(400)
+          .json({ message: "Disable two-factor authentication before generating a new secret." });
+      }
+      const secret = speakeasy.generateSecret({
+        name: `GetOTPs:${fresh.email}`,
+        issuer: "GetOTPs",
+        length: 32,
+      });
+      await storage.setUserAdminTotpSecret(fresh.id, secret.base32);
+      await storage.setUserAdminTotpEnabled(fresh.id, false);
+      const otpauthUrl = secret.otpauth_url!;
+      const qrDataUrl = await QRCode.toDataURL(otpauthUrl);
+      res.json({ otpauthUrl, qrDataUrl });
+    } catch (err: any) {
+      res.status(500).json({ message: safeError(err) });
+    }
+  });
+
+  app.post(
+    "/api/admin/2fa/verify",
+    requireAuth,
+    requireAdmin,
+    validateBody(admin2faVerifyBodySchema),
+    async (req, res) => {
+      try {
+        const admin = req.user as User;
+        const fresh = await storage.getUser(admin.id);
+        if (!fresh?.adminTotpSecret) return res.status(400).json({ message: "Run setup first" });
+        const { token } = req.body as { token: string };
+        const ok = speakeasy.totp.verify({
+          secret: fresh.adminTotpSecret,
+          encoding: "base32",
+          token,
+          window: 1,
+        });
+        if (!ok) return res.status(400).json({ message: "Invalid code" });
+        await storage.setUserAdminTotpEnabled(fresh.id, true);
+        await writeAudit(req, "password_change", { kind: "admin_2fa_enabled" }, fresh.id);
+        res.json({ ok: true });
+      } catch (err: any) {
+        res.status(500).json({ message: safeError(err) });
+      }
+    },
+  );
+
+  app.post(
+    "/api/admin/2fa/disable",
+    requireAuth,
+    requireAdmin,
+    requireAdmin2FAIfEnabled,
+    validateBody(admin2faDisableBodySchema),
+    async (req, res) => {
+      try {
+        const admin = req.user as User;
+        const { token } = req.body as { token: string };
+        const fresh = await storage.getUser(admin.id);
+        if (!fresh?.adminTotpSecret || !fresh.adminTotpEnabled) {
+          return res.json({ ok: true, message: "2FA already off" });
+        }
+        const ok = speakeasy.totp.verify({
+          secret: fresh.adminTotpSecret,
+          encoding: "base32",
+          token,
+          window: 1,
+        });
+        if (!ok) return res.status(400).json({ message: "Invalid code" });
+        await storage.setUserAdminTotpSecret(fresh.id, null);
+        await storage.setUserAdminTotpEnabled(fresh.id, false);
+        await writeAudit(req, "password_change", { kind: "admin_2fa_disabled" }, fresh.id);
+        res.json({ ok: true });
+      } catch (err: any) {
+        res.status(500).json({ message: safeError(err) });
+      }
+    },
+  );
+
+  app.post("/api/admin/crypto/:id/confirm", requireAdmin, requireAdmin2FAIfEnabled, async (req, res) => {
     try {
       const deposit = await storage.getCryptoDeposit(Number(req.params.id));
       if (!deposit) return res.status(404).json({ message: "Deposit not found" });
@@ -1379,11 +1514,11 @@ export async function registerRoutes(
     } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
   });
 
-  app.get("/api/admin/crypto/pending", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/crypto/pending", requireAdmin, requireAdmin2FAIfEnabled, async (_req, res) => {
     res.json(await storage.getAllPendingCryptoDeposits());
   });
 
-  app.get("/api/admin/crypto/all", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/crypto/all", requireAdmin, requireAdmin2FAIfEnabled, async (_req, res) => {
     res.json(await storage.getAllCryptoDeposits());
   });
 
@@ -1394,12 +1529,12 @@ export async function registerRoutes(
 
   // ========== ADMIN ==========
 
-  app.get("/api/admin/users", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/users", requireAdmin, requireAdmin2FAIfEnabled, async (_req, res) => {
     const allUsers = await storage.getAllUsers();
     res.json(allUsers.map(({ password: _, apiKey: __, ...u }) => u));
   });
 
-  app.get("/api/admin/stats", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/stats", requireAdmin, requireAdmin2FAIfEnabled, async (_req, res) => {
     const allUsers = await storage.getAllUsers();
     const allOrders = await storage.getAllOrders();
     const completedOrders = allOrders.filter(o => o.status === "completed" || o.status === "received");
@@ -1436,7 +1571,7 @@ export async function registerRoutes(
     });
   });
 
-  app.put("/api/admin/services/:id", requireAdmin, async (req, res) => {
+  app.put("/api/admin/services/:id", requireAdmin, requireAdmin2FAIfEnabled, async (req, res) => {
     try {
       const { price, isActive } = req.body;
       const update: Record<string, any> = {};
@@ -1454,7 +1589,7 @@ export async function registerRoutes(
     } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
   });
 
-  app.post("/api/admin/users/:id/add-balance", requireAdmin, async (req, res) => {
+  app.post("/api/admin/users/:id/add-balance", requireAdmin, requireAdmin2FAIfEnabled, async (req, res) => {
     try {
       const { amount } = req.body;
       if (!amount || isNaN(Number(amount)) || Number(amount) === 0) {
@@ -1801,7 +1936,7 @@ export async function registerRoutes(
     res.json({ ok: true });
   });
 
-  app.post("/api/admin/changelog", requireAdmin, async (req, res) => {
+  app.post("/api/admin/changelog", requireAdmin, requireAdmin2FAIfEnabled, async (req, res) => {
     const { title, body, type, showModal } = req.body;
     if (!title || !body || !type) return res.status(400).json({ message: "Missing required fields" });
     await pool.query(
@@ -1819,7 +1954,7 @@ export async function registerRoutes(
     res.json(rows);
   });
 
-  app.post("/api/admin/faq", requireAdmin, async (req, res) => {
+  app.post("/api/admin/faq", requireAdmin, requireAdmin2FAIfEnabled, async (req, res) => {
     const { question, answer, sortOrder } = req.body;
     if (!question || !answer) return res.status(400).json({ message: "Question and answer required" });
     await pool.query(
@@ -1856,12 +1991,12 @@ export async function registerRoutes(
     res.json({ ok: true, ticketId });
   });
 
-  app.get("/api/admin/support", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/support", requireAdmin, requireAdmin2FAIfEnabled, async (_req, res) => {
     const { rows } = await pool.query("SELECT * FROM support_tickets ORDER BY id DESC");
     res.json(rows);
   });
 
-  app.post("/api/admin/support/:id/reply", requireAdmin, async (req, res) => {
+  app.post("/api/admin/support/:id/reply", requireAdmin, requireAdmin2FAIfEnabled, async (req, res) => {
     const ticketId = Number(req.params.id);
     const { message, status } = req.body;
     if (!message) return res.status(400).json({ message: "Reply message required" });
@@ -1879,12 +2014,12 @@ export async function registerRoutes(
     res.json({ ok: true });
   });
 
-  app.get("/api/admin/abuse-events", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/abuse-events", requireAdmin, requireAdmin2FAIfEnabled, async (_req, res) => {
     const { rows } = await pool.query("SELECT * FROM abuse_events ORDER BY id DESC LIMIT 500");
     res.json(rows);
   });
 
-  app.get("/api/admin/high-risk-accounts", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/high-risk-accounts", requireAdmin, requireAdmin2FAIfEnabled, async (_req, res) => {
     const { rows } = await pool.query(
       `SELECT le.user_id AS "userId", u.email, u.username, MAX(le.risk_score) AS "maxRisk", MAX(le.created_at) AS "lastSeen"
        FROM login_events le
@@ -1896,7 +2031,7 @@ export async function registerRoutes(
     res.json(rows);
   });
 
-  app.post("/api/admin/abuse-events/:id/resolve", requireAdmin, async (req, res) => {
+  app.post("/api/admin/abuse-events/:id/resolve", requireAdmin, requireAdmin2FAIfEnabled, async (req, res) => {
     await pool.query("UPDATE abuse_events SET resolved_at = $1 WHERE id = $2", [
       new Date().toISOString(),
       Number(req.params.id),
@@ -1904,7 +2039,7 @@ export async function registerRoutes(
     res.json({ ok: true });
   });
 
-  app.get("/api/admin/users/:id/linked-accounts", requireAdmin, async (req, res) => {
+  app.get("/api/admin/users/:id/linked-accounts", requireAdmin, requireAdmin2FAIfEnabled, async (req, res) => {
     const linked = await getLinkedAccounts(Number(req.params.id));
     res.json({ linkedAccounts: linked });
   });
