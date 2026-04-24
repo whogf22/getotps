@@ -1,0 +1,49 @@
+services:
+  app:
+    build: .
+    ports:
+      - "5000:5000"
+    env_file: .env
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["node", "dist/worker.cjs"]
+    env_file: .env
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: getotps
+      POSTGRES_PASSWORD: getotps
+      POSTGRES_DB: getotps
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  # Optional: terminate TLS at the edge and reverse-proxy to `app:5000`
+  # nginx:
+  #   image: nginx:alpine
+  #   volumes:
+  #     - ./nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   depends_on:
+  #     - app
+
+volumes:
+  pgdata:

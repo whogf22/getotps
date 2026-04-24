@@ -7,6 +7,8 @@
     "dev": "NODE_ENV=development tsx server/index.ts",
     "build": "tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
+    "start:worker": "NODE_ENV=production node dist/worker.cjs",
+    "dev:worker": "NODE_ENV=development tsx server/worker.ts",
     "check": "tsc",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",

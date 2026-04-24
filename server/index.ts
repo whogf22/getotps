@@ -8,11 +8,10 @@ import slowDown from "express-slow-down";
 import { randomUUID } from "node:crypto";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
-import { startTronPoller, stopTronPoller } from "./tronPoller";
-import { startCleanupJobs, stopCleanupJobs } from "./jobs/cleanup";
+import { stopCleanupJobs } from "./jobs/cleanup";
 import { initFinancialSchema } from "./financial/core";
 import { financialIdempotencyMiddleware } from "./financial/idempotency";
-import { startReconciliationJob, stopReconciliationJob } from "./financial/reconciliation";
+import { stopReconciliationJob } from "./financial/reconciliation";
 import { createServer } from "http";
 import { scrubValue } from "./security/provider-scrub";
 import { toSafeErrorResponse } from "./security/errors";
@@ -90,7 +89,7 @@ app.use(
     },
     credentials: true,
     methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "X-CSRF-Token", "X-API-Key", "X-Request-Id"],
+    allowedHeaders: ["Content-Type", "X-CSRF-Token", "X-API-Key", "X-Request-Id", "X-Admin-Totp"],
   }),
 );
 
@@ -214,7 +213,7 @@ app.use((req, res, next) => {
   }
 
   const port = parseInt(process.env.PORT || "5000", 10);
-  httpServer.listen(
+  httpServer.    listen(
     {
       port,
       host: "0.0.0.0",
@@ -222,9 +221,7 @@ app.use((req, res, next) => {
     },
     () => {
       logger.info({ port }, "http_listen");
-      startTronPoller();
-      startCleanupJobs();
-      startReconciliationJob();
+      // Background jobs run in `server/worker.ts` (see npm run start:worker / PM2 worker app).
     },
   );
 
@@ -235,7 +232,6 @@ app.use((req, res, next) => {
     shuttingDown = true;
     logger.info({ signal }, "graceful_shutdown_start");
     stopCleanupJobs();
-    stopTronPoller();
     stopReconciliationJob();
 
     const deadline = Date.now() + 30_000;

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-04-25 - Admin 2FA, worker split, deploy assets
+
+- Admin TOTP 2FA: setup/verify/disable routes, optional `totpCode` on admin login, `requireAdmin2FAIfEnabled` on admin APIs, `X-Admin-Totp` CORS allowlist, Vitest coverage.
+- Background jobs (Tron poller, cleanup, financial reconciliation) moved to `server/worker.ts`; HTTP app no longer starts them. Added `npm run start:worker`, `dev:worker`, `ecosystem.config.cjs`, multi-stage `Dockerfile`, and `docker-compose.yml` (app + worker + Postgres + Redis).
+- Concurrency regression tests: parallel `upsertServices` and parallel `debitUserForPurchase` per user.
+
 ## 2026-04-24 - Production Re-Audit + Hardening
 
 - Added production hardening for proxy/cookie-aware request handling, explicit origin policy, CSRF-style origin checks, and safer API/IP rate-limit keying.

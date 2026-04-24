@@ -6,11 +6,12 @@ Virtual phone number and OTP verification platform. GetOTPs provides temporary p
 
 - **Frontend:** React + Vite + TypeScript + Tailwind CSS + shadcn/ui
 - **Backend:** Express.js + TypeScript + Passport.js
-- **Database:** SQLite (better-sqlite3) + Drizzle ORM
+- **Database:** PostgreSQL + Drizzle ORM
 - **SMS Provider:** Hidden upstream provider integration (server-side only)
 - **Wallet rail:** Hidden wallet provider integration (USDC deposit + server-side OTP payment)
 - **Payments:** Crypto deposits (BTC, ETH, USDT, USDC, LTC) with TronGrid auto-detection
-- **Session Store:** SQLite-backed (better-sqlite3-session-store)
+- **Session Store:** `connect-pg-simple` (PostgreSQL), optional Redis for rate limits
+- **Processes:** HTTP app (`dist/index.cjs`) + background worker (`dist/worker.cjs`: Tron poller, order/deposit cleanup, reconciliation)
 
 ## Features
 
@@ -49,9 +50,26 @@ Virtual phone number and OTP verification platform. GetOTPs provides temporary p
 |---------|-------------|
 | `npm run dev` | Start development server |
 | `npm run build` | Build for production |
-| `npm start` | Start production server |
+| `npm start` | Start production HTTP server |
+| `npm run start:worker` | Start background worker (required in prod with web) |
+| `npm run dev:worker` | Run worker in development |
 | `npm run check` | TypeScript type check |
 | `npm run db:push` | Push database schema |
+
+## Docker (optional)
+
+```bash
+docker compose up -d --build
+```
+
+Runs `app` (port 5000), `worker`, Postgres, and Redis. Set `DATABASE_URL` in `.env` to point at the `postgres` service when using Compose.
+
+## PM2
+
+```bash
+npm run build
+pm2 start ecosystem.config.cjs
+```
 
 ## Production Deployment
 
