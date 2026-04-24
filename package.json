@@ -16,7 +16,25 @@
     "db:push": "drizzle-kit push",
     "check:leaks": "node scripts/check-leaks.js",
     "check:live": "node scripts/check-live.js",
-    "deploy:purge": "node scripts/purge-cache.js"
+    "deploy:purge": "node scripts/purge-cache.js",
+    "prepare": "husky",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\" --ignore-path .gitignore --ignore-unknown",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\" --ignore-path .gitignore --ignore-unknown"
+  },
+  "prettier": {
+    "semi": true,
+    "singleQuote": false,
+    "trailingComma": "all",
+    "printWidth": 110,
+    "tabWidth": 2,
+    "useTabs": false,
+    "arrowParens": "always",
+    "endOfLine": "lf"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx,json,md,yml,yaml}": [
+      "prettier --write --ignore-unknown"
+    ]
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
@@ -124,7 +142,10 @@
     "autoprefixer": "^10.4.20",
     "drizzle-kit": "^0.31.8",
     "esbuild": "^0.25.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
     "postcss": "^8.4.47",
+    "prettier": "^3.8.3",
     "supertest": "^7.1.1",
     "tailwindcss": "^3.4.17",
     "tsx": "^4.20.5",

@@ -1,0 +1,55 @@
+#!/usr/bin/env sh
+# getotps pre-commit hook
+# 1. Block commits that contain secrets / forbidden filetypes
+# 2. Run lint-staged (Prettier on staged files)
+# 3. Fast typecheck
+#
+# Skippable in emergencies: `git commit --no-verify`
+
+set -e
+
+# ---------- 1. Forbidden files ----------
+BLOCKED=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '(^|/)\.env($|\.[^.]+$)|\.(db|sqlite3?|pem|key|p12|pfx)$' || true)
+if [ -n "$BLOCKED" ]; then
+  echo "✖  pre-commit: refusing to commit forbidden files:"
+  echo "$BLOCKED" | sed 's/^/    /'
+  echo "    (env files / db dumps / private keys must never be committed)"
+  exit 1
+fi
+
+# ---------- 2. Inline secret scan (regex) ----------
+# Exclude meta-files that legitimately contain pattern strings:
+#  - .husky/         (this hook itself, plus any sibling hook)
+#  - .gitleaks.toml  (gitleaks config)
+#  - scripts/check-leaks.js (existing leak scanner)
+#  - .github/        (CI workflows that reference secret names)
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR \
+  | grep -Ev '^(node_modules/|dist/|build/|\.husky/|\.github/|\.gitleaks\.toml$|scripts/check-leaks\.js$)')
+if [ -n "$STAGED" ]; then
+  HITS=$(git diff --cached -U0 -- $STAGED 2>/dev/null \
+    | grep -E '^\+' \
+    | grep -Ev '^\+\+\+|example|placeholder|EXAMPLE|PLACEHOLDER|your-|replace-with|REPLACE_WITH|sk_test_|pk_test_' \
+    | grep -E -i '(aws_secret_access_key|aws_access_key_id|-----BEGIN [A-Z ]*PRIVATE KEY-----|api[_-]?key["'"'"' ]*[:=]["'"'"' ]*[A-Za-z0-9_-]{24,}|secret["'"'"' ]*[:=]["'"'"' ]*[A-Za-z0-9_-]{24,}|password["'"'"' ]*[:=]["'"'"' ]*[A-Za-z0-9!@#$%^&*_+-]{12,}|sk_live_[A-Za-z0-9]{24,}|xox[abp]-[A-Za-z0-9-]+|ghp_[A-Za-z0-9]{30,}|AIza[0-9A-Za-z_-]{30,}|eyJ[A-Za-z0-9_-]{40,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)' \
+    || true)
+  if [ -n "$HITS" ]; then
+    echo "✖  pre-commit: possible secret detected in staged diff:"
+    echo "$HITS" | head -10 | sed 's/^/    /'
+    echo "    Strip the value, rotate the credential, then re-stage."
+    echo "    To bypass intentionally (e.g. example values), use git commit --no-verify."
+    exit 1
+  fi
+fi
+
+# ---------- 3. gitleaks (only if installed) ----------
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks protect --staged --redact --no-banner || {
+    echo "✖  pre-commit: gitleaks blocked the commit"
+    exit 1
+  }
+fi
+
+# ---------- 4. lint-staged (Prettier on staged files) ----------
+npx --no-install lint-staged 2>/dev/null || npx lint-staged
+
+# ---------- 5. Type check ----------
+npx tsc --noEmit

@@ -17,10 +17,23 @@ data.db-wal
 .env.local
 .env.production
 .env.*.local
+.env.*
+!.env.example
 
 # Temp / cache
 .cache/
 *.log
+/logs
+/build
+*.tsbuildinfo
+
+# Secrets / certs
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+.secrets/
 
 # OS files
 .DS_Store
