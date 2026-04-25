@@ -1,129 +1,128 @@
-# GetOTPs
+# GetOTPs — Virtual Phone Numbers for SMS Verification
 
-Virtual phone number and OTP verification platform. GetOTPs provides temporary phone numbers for SMS verification, powered by a hidden upstream SMS integration with crypto deposit support and auto-detection.
+[![Status](https://img.shields.io/badge/status-production-brightgreen)]()
+[![Node](https://img.shields.io/badge/node-20.x-339933?logo=node.js&logoColor=white)]()
+[![License](https://img.shields.io/badge/license-Proprietary-blue)]()
+
+A production-grade virtual number / OTP rental service. Users buy disposable phone numbers to receive SMS verification codes for any online service. Live on **getotps.com** and **getotps.online**.
+
+---
+
+## Highlights
+
+- **Real-time SMS upstream** — integrates with TellaBot for live phone-number provisioning and OTP delivery.
+- **Multi-currency wallet** — USD, USDT (TRC20), BTC, ETH, LTC. Crypto deposits auto-credited via on-chain polling.
+- **Circle USDC integration** — per-user programmable wallets for stablecoin settlement.
+- **Admin panel** — service catalog, pricing markup, balance adjustments, order audit trail.
+- **Production hardening** — PM2 cluster, Nginx reverse proxy, Cloudflare edge, structured logging, rate limiting, Turnstile bot protection.
+
+---
 
 ## Tech Stack
 
-- **Frontend:** React + Vite + TypeScript + Tailwind CSS + shadcn/ui
-- **Backend:** Express.js + TypeScript + Passport.js
-- **Database:** PostgreSQL + Drizzle ORM
-- **SMS Provider:** Hidden upstream provider integration (server-side only)
-- **Wallet rail:** Hidden wallet provider integration (USDC deposit + server-side OTP payment)
-- **Payments:** Crypto deposits (BTC, ETH, USDT, USDC, LTC) with TronGrid auto-detection
-- **Session Store:** `connect-pg-simple` (PostgreSQL), optional Redis for rate limits
-- **Processes:** HTTP app (`dist/index.cjs`) + background worker (`dist/worker.cjs`: Tron poller, order/deposit cleanup, reconciliation)
+| Layer | Technology |
+|---|---|
+| Runtime | Node.js 20 + TypeScript |
+| Web framework | Express |
+| Frontend | React 18 + Vite + TailwindCSS |
+| Database | SQLite (better-sqlite3) — Postgres-ready via Drizzle ORM |
+| Auth | Session-based + bcrypt + Cloudflare Turnstile |
+| Process manager | PM2 (fork mode, 2 processes) |
+| Reverse proxy | Nginx + Let's Encrypt SSL |
+| Crypto | TronGrid (USDT TRC20), Circle USDC API |
+| SMS upstream | TellaBot API |
 
-## Features
+---
 
-- SMS verification number rental for 100+ services
-- Real-time OTP detection and extraction
-- Crypto deposit system with multiple currencies
-- TronGrid USDT TRC20 auto-deposit detection
-- Financial safety hardening (idempotency + atomic balance updates + append-only ledger entries)
-- Webhook signature verification (HMAC + timestamp replay window)
-- Daily reconciliation and freeze-on-mismatch safeguard
-- User dashboard with balance management
-- Admin panel with revenue tracking and user management
-- RESTful API with API key authentication
-- Rate limiting and security headers (Helmet)
+## Project Structure
 
-## Setup
+```
+getotps/
+├── client/              # React + Vite frontend
+│   ├── src/
+│   └── public/
+├── server/              # Express backend
+│   ├── routes.ts        # All HTTP routes
+│   ├── tellabot/        # SMS upstream client
+│   ├── services/        # Business logic (orders, wallet, pricing)
+│   ├── security/        # Errors, redaction, version check
+│   ├── middleware/      # Validation, rate limit
+│   ├── jobs/            # Background cleanup jobs
+│   ├── financial/       # Webhook security
+│   └── worker.ts        # Crypto deposit poller
+├── shared/              # Types & Drizzle schema
+├── dist/                # Build output (gitignored)
+└── drizzle.config.ts
+```
 
-1. Clone the repository
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-3. Copy environment variables:
-   ```bash
-   cp .env.example .env
-   ```
-4. Edit `.env` with your credentials (SMS provider API, session secret, crypto wallets, etc.)
-5. Start development server:
-   ```bash
-   npm run dev
-   ```
+---
+
+## Quick Start (Local Dev)
+
+```bash
+git clone https://github.com/whogf22/getotps.git
+cd getotps
+npm install
+cp .env.example .env       # then fill required values
+npm run db:push            # sync schema
+npm run dev                # http://localhost:5000
+```
+
+## Production Deploy
+
+```bash
+git pull origin master
+npm install
+npm run build
+pm2 restart getotps otp-worker --update-env
+sudo systemctl reload nginx
+```
+
+---
+
+## Required Environment Variables
+
+See `.env.example` for the full list. Critical ones:
+
+- `NODE_ENV=production`
+- `PORT=5000`
+- `SESSION_SECRET` — long random string
+- `TELLABOT_USER`, `TELLABOT_API_KEY`, `TELLABOT_MARKUP`
+- `TRONGRID_API_KEY`
+- `CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`
+- `TURNSTILE_SECRET_KEY`
+- `CRYPTO_WALLET_BTC`, `CRYPTO_WALLET_ETH`, `CRYPTO_WALLET_USDT`, `CRYPTO_WALLET_LTC`
+
+**Never commit `.env` to the repo.**
+
+---
 
 ## Scripts
 
-| Command | Description |
-|---------|-------------|
-| `npm run dev` | Start development server |
-| `npm run build` | Build for production |
-| `npm start` | Start production HTTP server |
-| `npm run start:worker` | Start background worker (required in prod with web) |
-| `npm run dev:worker` | Run worker in development |
-| `npm run check` | TypeScript type check |
-| `npm run db:push` | Push database schema |
-
-## Docker (optional)
-
-```bash
-docker compose up -d --build
+```
+npm run dev         # Vite dev server + tsx watch
+npm run build       # Production build (frontend + backend)
+npm run start       # Production start
+npm run db:push     # Apply Drizzle schema
+npm run check       # Type-check
+npm run test        # Vitest
 ```
 
-Runs `app` (port 5000), `worker`, Postgres, and Redis. Set `DATABASE_URL` in `.env` to point at the `postgres` service when using Compose.
+---
 
-## PM2
+## Security
 
-```bash
-npm run build
-pm2 start ecosystem.config.cjs
-```
+- Secrets never in Git. `.env*` is gitignored.
+- HTTPS-only via Cloudflare → Nginx → Node.
+- Session cookies are `httpOnly`, `secure`, `sameSite=lax`.
+- CSRF, rate limiting, input validation in place.
+- Webhook signatures verified for Circle deposits.
+- Sensitive provider responses scrubbed before client-side return.
 
-## Production Deployment
+Found a security issue? Email **security@getotps.com**.
 
-Use the included deployment script on your VPS:
-
-```bash
-bash scripts/deploy.sh
-```
-
-Then edit `.env` with real credentials and restart with PM2.
-
-## Environment Variables
-
-See `.env.example` for all required configuration variables.
-
-## Hidden Upstream OTP Integration
-
-- Upstream provider calls are **server-side only**.
-- Browser/client responses never expose upstream API keys or activation IDs.
-- OTP lifecycle is handled by backend endpoints:
-  - `POST /api/buy-number`
-  - `GET /api/check-sms/:orderId`
-
-## Wallet Deposit Flow
-
-- Each user can be assigned a dedicated wallet address.
-- Dashboard/Add Funds UI can generate and display a user-specific USDC deposit address.
-- Backend fetches USDC wallet balance using wallet provider APIs.
-- OTP purchase flow transfers USDC from user wallet to configured master wallet before upstream number purchase.
-
-### Ops Note
-
-This codebase does not automate exchange conversion from master USDC holdings to provider funding assets.  
-Operations should periodically transfer and convert funds externally before topping up the upstream OTP supplier account.
-
-## Financial Controls
-
-- Financial write endpoints require `Idempotency-Key` headers (`/api/buy-number`, `/api/deposit`, `/api/withdraw`, `/api/upgrade`, `/api/payment/*`).
-- User balance updates are executed through atomic immediate transactions and synchronized in both decimal and cents fields.
-- Ledger entries are append-only and every transaction is validated for debit/credit balance.
-- Wallet webhooks are accepted only with valid HMAC signature, valid timestamp (<= 300 seconds), and unique webhook IDs.
-- Cleanup worker auto-refunds stale pending orders and emits critical alerts for stuck flows.
-- Reconciliation runs daily at 00:00 UTC and freezes financial writes if mismatch exceeds $0.01.
-
-## API Documentation
-
-API endpoints are available at `/api/v1/` with API key authentication via `X-API-Key` header.
-
-## Deployment Verification
-
-- `npm run check:leaks` scans build output for banned provider identifiers.
-- `npm run check:live` verifies live version, health, and service endpoints.
-- `npm run deploy:purge` purges CDN cache if cloud cache credentials are configured.
+---
 
 ## License
 
-MIT
+Proprietary. All rights reserved © 2026 GetOTPs.
