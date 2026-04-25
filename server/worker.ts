@@ -8,6 +8,7 @@ import { initFinancialSchema } from "./financial/core";
 import { startTronPoller, stopTronPoller } from "./tronPoller";
 import { startCleanupJobs, stopCleanupJobs } from "./jobs/cleanup";
 import { startReconciliationJob, stopReconciliationJob } from "./financial/reconciliation";
+import { startProviderHealthPoller, stopProviderHealthPoller } from "./jobs/providerHealth";
 import { closePool } from "./db";
 import { closeRedis } from "./redis";
 
@@ -16,6 +17,7 @@ void (async () => {
   startTronPoller();
   startCleanupJobs();
   startReconciliationJob();
+  await startProviderHealthPoller();
   logger.info("background_worker_started");
 
   let shuttingDown = false;
@@ -26,12 +28,14 @@ void (async () => {
     stopCleanupJobs();
     stopTronPoller();
     stopReconciliationJob();
+    stopProviderHealthPoller();
     void closePool()
       .catch((e) => logger.error({ err: e }, "pool_close"))
-      .finally(() =>
-        void closeRedis()
-          .catch((e) => logger.error({ err: e }, "redis_close"))
-          .finally(() => process.exit(0)),
+      .finally(
+        () =>
+          void closeRedis()
+            .catch((e) => logger.error({ err: e }, "redis_close"))
+            .finally(() => process.exit(0)),
       );
   };
 

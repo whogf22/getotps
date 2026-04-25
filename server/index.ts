@@ -12,6 +12,7 @@ import { stopCleanupJobs } from "./jobs/cleanup";
 import { initFinancialSchema } from "./financial/core";
 import { financialIdempotencyMiddleware } from "./financial/idempotency";
 import { stopReconciliationJob } from "./financial/reconciliation";
+import { seedProviders } from "./providers";
 import { createServer } from "http";
 import { scrubValue } from "./security/provider-scrub";
 import { toSafeErrorResponse } from "./security/errors";
@@ -184,6 +185,9 @@ app.use((req, res, next) => {
 
 (async () => {
   await initFinancialSchema();
+  // Best-effort: seed the new `providers` registry. Skipped silently if the
+  // table hasn't been migrated yet (npm run db:push will create it).
+  await seedProviders().catch(() => {});
   await registerRoutes(httpServer, app);
 
   app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
@@ -213,7 +217,7 @@ app.use((req, res, next) => {
   }
 
   const port = parseInt(process.env.PORT || "5000", 10);
-  httpServer.    listen(
+  httpServer.listen(
     {
       port,
       host: "0.0.0.0",
@@ -244,10 +248,11 @@ app.use((req, res, next) => {
           if (closeErr) logger.error({ err: closeErr }, "http_server_close");
           void closePool()
             .catch((e) => logger.error({ err: e }, "pool_close"))
-            .finally(() =>
-              void closeRedis()
-                .catch((e) => logger.error({ err: e }, "redis_close"))
-                .finally(() => process.exit(0)),
+            .finally(
+              () =>
+                void closeRedis()
+                  .catch((e) => logger.error({ err: e }, "redis_close"))
+                  .finally(() => process.exit(0)),
             );
         });
         return;

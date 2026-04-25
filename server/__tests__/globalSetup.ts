@@ -47,9 +47,7 @@ async function ensureDatabaseExists(connectionString: string): Promise<void> {
  */
 export default async function globalSetup(): Promise<void> {
   const url =
-    process.env.DATABASE_URL_TEST ||
-    process.env.DATABASE_URL ||
-    "postgresql://127.0.0.1:5432/getotps_test";
+    process.env.DATABASE_URL_TEST || process.env.DATABASE_URL || "postgresql://127.0.0.1:5432/getotps_test";
   process.env.DATABASE_URL = url;
 
   await ensureDatabaseExists(url);
@@ -88,6 +86,19 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_token_hash text;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_expires_at timestamptz;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_totp_secret text;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_totp_enabled boolean NOT NULL DEFAULT false;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS provider_slug text DEFAULT 'tellabot';
+CREATE INDEX IF NOT EXISTS idx_orders_provider_slug ON orders(provider_slug);
+CREATE TABLE IF NOT EXISTS providers (
+  id serial PRIMARY KEY,
+  slug text NOT NULL UNIQUE,
+  name text NOT NULL,
+  enabled boolean NOT NULL DEFAULT true,
+  priority integer NOT NULL DEFAULT 100,
+  last_health_at timestamptz,
+  last_balance_cents integer,
+  last_error text,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
 `);
   } catch (e) {
     console.warn("[vitest globalSetup] users column patch failed:", e instanceof Error ? e.message : e);

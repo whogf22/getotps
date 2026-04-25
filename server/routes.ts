@@ -12,15 +12,12 @@ import speakeasy from "speakeasy";
 import QRCode from "qrcode";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import {
-  buyNumberFromTellabot,
-  cancelTellabotNumber,
-  waitForSmsCode,
-} from "./services/tellabot.service";
-import {
-  createUserWallet,
-  getUserUsdcBalance,
-  transferFromUserToMaster,
-} from "./services/circle.service";
+  buyNumber as routerBuyNumber,
+  cancelOrder as routerCancelOrder,
+  checkSms as routerCheckSms,
+  listKnownProviders,
+} from "./providers";
+import { createUserWallet, getUserUsdcBalance, transferFromUserToMaster } from "./services/circle.service";
 import { getUsdcSellPrice } from "./services/pricing.service";
 import { sendFinancialAlert } from "./financial/alerts";
 import { logFinancialEvent } from "./financial/logging";
@@ -49,6 +46,7 @@ import { sendEmailVerificationMessage, sendPasswordResetMessage } from "./email"
 import { writeAudit } from "./audit";
 import { verifyTurnstile } from "./turnstile";
 import { validateBody } from "./middleware/validate";
+import { buildOpenApiSpec } from "./openapi";
 import {
   registerBodySchema,
   loginBodySchema,
@@ -87,18 +85,55 @@ const MARKUP_MULTIPLIER = parseFloat(process.env.TELLABOT_MARKUP || "1.5");
 
 // Service category mapping for popular services
 const SERVICE_CATEGORIES: Record<string, string> = {
-  WhatsApp: "Messaging", Telegram: "Messaging", Discord: "Messaging", Signal: "Messaging",
-  Viber: "Messaging", LINE: "Messaging", WeChat: "Messaging", KakaoTalk: "Messaging",
-  Google: "Tech", Microsoft: "Tech", Apple: "Tech", AWS: "Tech", GitHub: "Tech", Anthropic: "Tech",
-  Facebook: "Social", Instagram: "Social", Twitter: "Social", TikTok: "Social",
-  Snapchat: "Social", LinkedIn: "Social", Reddit: "Social", Pinterest: "Social",
-  Amazon: "Shopping", eBay: "Shopping", Walmart: "Shopping", BestBuy: "Shopping",
-  Uber: "Transport", Lyft: "Transport", DoorDash: "Food", Grubhub: "Food", UberEats: "Food",
-  Airbnb: "Travel", Booking: "Travel",
-  PayPal: "Finance", CashApp: "Finance", Venmo: "Finance", Chime: "Finance", Zelle: "Finance",
-  Coinbase: "Crypto", Binance: "Crypto", Kraken: "Crypto",
-  Netflix: "Entertainment", Spotify: "Entertainment", Hulu: "Entertainment", Disney: "Entertainment",
-  Bumble: "Dating", Tinder: "Dating", Hinge: "Dating", Badoo: "Dating",
+  WhatsApp: "Messaging",
+  Telegram: "Messaging",
+  Discord: "Messaging",
+  Signal: "Messaging",
+  Viber: "Messaging",
+  LINE: "Messaging",
+  WeChat: "Messaging",
+  KakaoTalk: "Messaging",
+  Google: "Tech",
+  Microsoft: "Tech",
+  Apple: "Tech",
+  AWS: "Tech",
+  GitHub: "Tech",
+  Anthropic: "Tech",
+  Facebook: "Social",
+  Instagram: "Social",
+  Twitter: "Social",
+  TikTok: "Social",
+  Snapchat: "Social",
+  LinkedIn: "Social",
+  Reddit: "Social",
+  Pinterest: "Social",
+  Amazon: "Shopping",
+  eBay: "Shopping",
+  Walmart: "Shopping",
+  BestBuy: "Shopping",
+  Uber: "Transport",
+  Lyft: "Transport",
+  DoorDash: "Food",
+  Grubhub: "Food",
+  UberEats: "Food",
+  Airbnb: "Travel",
+  Booking: "Travel",
+  PayPal: "Finance",
+  CashApp: "Finance",
+  Venmo: "Finance",
+  Chime: "Finance",
+  Zelle: "Finance",
+  Coinbase: "Crypto",
+  Binance: "Crypto",
+  Kraken: "Crypto",
+  Netflix: "Entertainment",
+  Spotify: "Entertainment",
+  Hulu: "Entertainment",
+  Disney: "Entertainment",
+  Bumble: "Dating",
+  Tinder: "Dating",
+  Hinge: "Dating",
+  Badoo: "Dating",
 };
 
 async function tellabotAPI(cmd: string, params: Record<string, string> = {}): Promise<any> {
@@ -164,9 +199,9 @@ async function fetchTellabotServices(): Promise<any[]> {
 function extractOTPFromText(text: string): string | null {
   // Common patterns: 6 digits, 4-8 digit codes
   const patterns = [
-    /\b(\d{6})\b/,  // 6-digit code (most common)
-    /\b(\d{4})\b/,  // 4-digit code
-    /\b(\d{5})\b/,  // 5-digit code
+    /\b(\d{6})\b/, // 6-digit code (most common)
+    /\b(\d{4})\b/, // 4-digit code
+    /\b(\d{5})\b/, // 5-digit code
     /\b(\d{7,8})\b/, // 7-8 digit code
     /code[:\s]+(\d{4,8})/i,
     /pin[:\s]+(\d{4,8})/i,
@@ -221,15 +256,38 @@ const CRYPTO_RATES: Record<string, number> = {
   LTC: parseFloat(process.env.CRYPTO_RATE_LTC || "92.50"),
 };
 
-export async function registerRoutes(
-  httpServer: Server,
-  app: Express
-): Promise<Server> {
+export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   const version = readAppVersion();
 
   app.get("/api/version", (_req, res) => {
     res.setHeader("Cache-Control", "no-store");
     return res.status(200).json(version);
+  });
+
+  app.get("/api/openapi.json", (req, res) => {
+    const baseUrl = `${req.protocol}://${req.get("host") || "getotps.com"}`;
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(200).json(buildOpenApiSpec(baseUrl));
+  });
+
+  app.get("/api/docs", (req, res) => {
+    const specUrl = `${req.protocol}://${req.get("host") || "getotps.com"}/api/openapi.json`;
+    return res.status(200).send(`<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GetOTPs API Docs</title>
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script>
+      window.ui = SwaggerUIBundle({ url: "${specUrl}", dom_id: "#swagger-ui" });
+    </script>
+  </body>
+</html>`);
   });
 
   app.get("/healthz", (_req, res) => {
@@ -270,14 +328,18 @@ export async function registerRoutes(
 
   if (!process.env.SESSION_SECRET) {
     if (isProduction) {
-      throw new Error("FATAL: SESSION_SECRET must be set in production. Refusing to start with insecure default.");
+      throw new Error(
+        "FATAL: SESSION_SECRET must be set in production. Refusing to start with insecure default.",
+      );
     }
     console.warn("WARNING: SESSION_SECRET not set. Using insecure default. Set it in .env for production!");
   }
 
   if (!process.env.JWT_SECRET) {
     if (isProduction) {
-      throw new Error("FATAL: JWT_SECRET must be set in production. Refusing to start with insecure default.");
+      throw new Error(
+        "FATAL: JWT_SECRET must be set in production. Refusing to start with insecure default.",
+      );
     }
     console.warn("WARNING: JWT_SECRET not set. Using insecure default. Set it in .env for production!");
   }
@@ -395,7 +457,13 @@ export async function registerRoutes(
   }
 
   function sanitizeOrderForClient(order: any) {
-    const { tellabotRequestId: _tbid, tellabotMdn: _tbmdn, activationId: _aid, costPrice: _cost, ...safe } = order;
+    const {
+      tellabotRequestId: _tbid,
+      tellabotMdn: _tbmdn,
+      activationId: _aid,
+      costPrice: _cost,
+      ...safe
+    } = order;
     return safe;
   }
 
@@ -460,79 +528,80 @@ export async function registerRoutes(
     verifyTurnstile(),
     validateBody(registerBodySchema),
     async (req, res) => {
-    try {
-      const { username, email, password } = req.body as {
-        username: string;
-        email: string;
-        password: string;
-      };
-      const existing = await storage.getUserByEmail(email);
-      if (existing) return res.status(400).json({ message: "Email already registered" });
-      const existingUsername = await storage.getUserByUsername(username);
-      if (existingUsername) return res.status(400).json({ message: "Username already taken" });
+      try {
+        const { username, email, password } = req.body as {
+          username: string;
+          email: string;
+          password: string;
+        };
+        const existing = await storage.getUserByEmail(email);
+        if (existing) return res.status(400).json({ message: "Email already registered" });
+        const existingUsername = await storage.getUserByUsername(username);
+        if (existingUsername) return res.status(400).json({ message: "Username already taken" });
 
-      const hashedPassword = await bcrypt.hash(password, 10);
-      const user = await storage.createUser({ username, email, password: hashedPassword });
-      const verifyNonce = randomBytes(24).toString("hex");
-      const verifyJwt = signEmailVerificationJwt(user.id, verifyNonce);
-      await storage.setUserEmailVerification(user.id, {
-        tokenHash: sha256Hex(verifyNonce),
-        expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
-        sentAt: new Date(),
-      });
-      void sendEmailVerificationMessage({ to: user.email, verifyToken: verifyJwt }).catch(() => {});
-      const fpPayload = extractFingerprintPayload(req);
-      const fingerprintHash = computeFingerprintHash(fpPayload);
-      const risk = await assessRisk({
-        userId: user.id,
-        email,
-        fingerprintHash,
-        ipAddress: fpPayload.ipAddress,
-        country: fpPayload.country,
-        asn: fpPayload.asn,
-      });
-      await recordLoginEvent({
-        userId: user.id,
-        email,
-        eventType: "register",
-        fingerprintHash,
-        ipAddress: fpPayload.ipAddress,
-        asn: fpPayload.asn,
-        country: fpPayload.country,
-        riskScore: risk.score,
-        reasons: risk.reasons,
-      });
-      if (risk.blockedForReview) {
-        await recordAbuseEvent({
-          userId: user.id,
-          ip: fpPayload.ipAddress,
-          fingerprintHash,
-          eventType: "high_risk_registration",
-          details: { score: risk.score, reasons: risk.reasons },
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const user = await storage.createUser({ username, email, password: hashedPassword });
+        const verifyNonce = randomBytes(24).toString("hex");
+        const verifyJwt = signEmailVerificationJwt(user.id, verifyNonce);
+        await storage.setUserEmailVerification(user.id, {
+          tokenHash: sha256Hex(verifyNonce),
+          expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
+          sentAt: new Date(),
         });
-      }
+        void sendEmailVerificationMessage({ to: user.email, verifyToken: verifyJwt }).catch(() => {});
+        const fpPayload = extractFingerprintPayload(req);
+        const fingerprintHash = computeFingerprintHash(fpPayload);
+        const risk = await assessRisk({
+          userId: user.id,
+          email,
+          fingerprintHash,
+          ipAddress: fpPayload.ipAddress,
+          country: fpPayload.country,
+          asn: fpPayload.asn,
+        });
+        await recordLoginEvent({
+          userId: user.id,
+          email,
+          eventType: "register",
+          fingerprintHash,
+          ipAddress: fpPayload.ipAddress,
+          asn: fpPayload.asn,
+          country: fpPayload.country,
+          riskScore: risk.score,
+          reasons: risk.reasons,
+        });
+        if (risk.blockedForReview) {
+          await recordAbuseEvent({
+            userId: user.id,
+            ip: fpPayload.ipAddress,
+            fingerprintHash,
+            eventType: "high_risk_registration",
+            details: { score: risk.score, reasons: risk.reasons },
+          });
+        }
 
-      req.login(user, async (err) => {
-        if (err) return res.status(500).json({ message: "Login failed after registration" });
-        await writeAudit(req, "register", { email }, user.id);
-        const { password: _, apiKey: __, ...safeUser } = user;
-        const linkedAccounts = await getLinkedAccounts(user.id);
-        return res.json(
-          scrubValue({
-            ...safeUser,
-            security: {
-              riskScore: risk.score,
-              captchaRequired: risk.requireCaptcha,
-              otpRequired: risk.requireOtp,
-              linkedAccountsCount: linkedAccounts.length,
-            },
-          }),
-        );
-      });
-    } catch (err: any) {
-      res.status(500).json({ message: safeError(err) });
-    }
-  });
+        req.login(user, async (err) => {
+          if (err) return res.status(500).json({ message: "Login failed after registration" });
+          await writeAudit(req, "register", { email }, user.id);
+          const { password: _, apiKey: __, ...safeUser } = user;
+          const linkedAccounts = await getLinkedAccounts(user.id);
+          return res.json(
+            scrubValue({
+              ...safeUser,
+              security: {
+                riskScore: risk.score,
+                captchaRequired: risk.requireCaptcha,
+                otpRequired: risk.requireOtp,
+                linkedAccountsCount: linkedAccounts.length,
+              },
+            }),
+          );
+        });
+      } catch (err: any) {
+        res.status(500).json({ message: safeError(err) });
+      }
+    },
+  );
 
   app.post("/api/auth/verify-email", authLimiter, validateBody(verifyEmailBodySchema), async (req, res) => {
     try {
@@ -574,129 +643,146 @@ export async function registerRoutes(
     verifyTurnstile(),
     validateBody(forgotPasswordBodySchema),
     async (req, res) => {
-    try {
-      const email = String((req.body as { email: string }).email || "").trim();
-      if (!email) {
+      try {
+        const email = String((req.body as { email: string }).email || "").trim();
+        if (!email) {
+          return res.json(forgotPasswordResponse);
+        }
+        const user = await storage.getUserByEmail(email);
+        if (!user) return res.json(forgotPasswordResponse);
+        const raw = randomBytes(32).toString("hex");
+        const hash = sha256Hex(raw);
+        await storage.setUserPasswordReset(user.id, hash, new Date(Date.now() + 60 * 60 * 1000));
+        void sendPasswordResetMessage({ to: user.email, resetToken: `${user.id}|${raw}` }).catch(() => {});
+        await writeAudit(req, "password_reset", { stage: "requested", email }, user.id);
         return res.json(forgotPasswordResponse);
+      } catch (err: any) {
+        res.status(500).json({ message: safeError(err) });
       }
-      const user = await storage.getUserByEmail(email);
-      if (!user) return res.json(forgotPasswordResponse);
-      const raw = randomBytes(32).toString("hex");
-      const hash = sha256Hex(raw);
-      await storage.setUserPasswordReset(user.id, hash, new Date(Date.now() + 60 * 60 * 1000));
-      void sendPasswordResetMessage({ to: user.email, resetToken: `${user.id}|${raw}` }).catch(() => {});
-      await writeAudit(req, "password_reset", { stage: "requested", email }, user.id);
-      return res.json(forgotPasswordResponse);
-    } catch (err: any) {
-      res.status(500).json({ message: safeError(err) });
-    }
-  });
+    },
+  );
 
-  app.post("/api/auth/reset-password", authLimiter, validateBody(resetPasswordBodySchema), async (req, res) => {
-    try {
-      const token = String((req.body as { token: string }).token || "");
-      const newPassword = String((req.body as { password: string }).password || "");
-      if (!token || !newPassword) return res.status(400).json({ message: "Token and password required" });
-      if (newPassword.length < 8) {
-        return res.status(400).json({ message: "Password must be at least 8 characters" });
-      }
-      const pipe = token.indexOf("|");
-      if (pipe < 1) return res.status(400).json({ message: "Invalid token" });
-      const userId = Number(token.slice(0, pipe));
-      const raw = token.slice(pipe + 1);
-      if (!Number.isFinite(userId) || raw.length < 16) return res.status(400).json({ message: "Invalid token" });
-      const hash = sha256Hex(raw);
-      const user = await storage.getUserByPasswordResetTokenHash(hash);
-      if (!user || user.id !== userId) return res.status(400).json({ message: "Invalid or expired reset link" });
-      if (!user.passwordResetExpiresAt || new Date(user.passwordResetExpiresAt) < new Date()) {
-        return res.status(400).json({ message: "Invalid or expired reset link" });
-      }
-      const hashedPassword = await bcrypt.hash(newPassword, 10);
-      await storage.updateUserPassword(user.id, hashedPassword);
-      await storage.clearUserPasswordReset(user.id);
-      await writeAudit(req, "password_reset", { stage: "completed" }, user.id);
-      res.json({ message: "Password updated" });
-    } catch (err: any) {
-      res.status(500).json({ message: safeError(err) });
-    }
-  });
-
-  app.post("/api/auth/login", authLimiter, verifyTurnstile(), validateBody(loginBodySchema), (req, res, next) => {
-    passport.authenticate("local", (err: unknown, user: false | User | undefined, _info: { message?: string }) => {
-      void (async () => {
-        if (err) return res.status(500).json({ message: safeError(err) });
-        const fpPayload = extractFingerprintPayload(req);
-        const fingerprintHash = computeFingerprintHash(fpPayload);
-        const email = String((req.body || {}).email || "");
-        if (!user) {
-          const failedRisk = await assessRisk({
-            email,
-            fingerprintHash,
-            ipAddress: fpPayload.ipAddress,
-            country: fpPayload.country,
-            asn: fpPayload.asn,
-          });
-          await recordLoginEvent({
-            userId: null,
-            email,
-            eventType: "login_failed",
-            fingerprintHash,
-            ipAddress: fpPayload.ipAddress,
-            asn: fpPayload.asn,
-            country: fpPayload.country,
-            riskScore: failedRisk.score,
-            reasons: failedRisk.reasons,
-          });
-          return res.status(401).json({ message: "Invalid credentials." });
+  app.post(
+    "/api/auth/reset-password",
+    authLimiter,
+    validateBody(resetPasswordBodySchema),
+    async (req, res) => {
+      try {
+        const token = String((req.body as { token: string }).token || "");
+        const newPassword = String((req.body as { password: string }).password || "");
+        if (!token || !newPassword) return res.status(400).json({ message: "Token and password required" });
+        if (newPassword.length < 8) {
+          return res.status(400).json({ message: "Password must be at least 8 characters" });
         }
-
-        const risk = await assessRisk({
-          userId: user.id as number,
-          email: String(user.email),
-          fingerprintHash,
-          ipAddress: fpPayload.ipAddress,
-          country: fpPayload.country,
-          asn: fpPayload.asn,
-        });
-        await recordLoginEvent({
-          userId: user.id as number,
-          email: String(user.email),
-          eventType: "login_success",
-          fingerprintHash,
-          ipAddress: fpPayload.ipAddress,
-          asn: fpPayload.asn,
-          country: fpPayload.country,
-          riskScore: risk.score,
-          reasons: risk.reasons,
-        });
-        if (risk.blockedForReview) {
-          await recordAbuseEvent({
-            userId: user.id as number,
-            ip: fpPayload.ipAddress,
-            fingerprintHash,
-            eventType: "high_risk_login_block_review",
-            details: { score: risk.score, reasons: risk.reasons },
-          });
+        const pipe = token.indexOf("|");
+        if (pipe < 1) return res.status(400).json({ message: "Invalid token" });
+        const userId = Number(token.slice(0, pipe));
+        const raw = token.slice(pipe + 1);
+        if (!Number.isFinite(userId) || raw.length < 16)
+          return res.status(400).json({ message: "Invalid token" });
+        const hash = sha256Hex(raw);
+        const user = await storage.getUserByPasswordResetTokenHash(hash);
+        if (!user || user.id !== userId)
+          return res.status(400).json({ message: "Invalid or expired reset link" });
+        if (!user.passwordResetExpiresAt || new Date(user.passwordResetExpiresAt) < new Date()) {
+          return res.status(400).json({ message: "Invalid or expired reset link" });
         }
-        req.login(user, (loginErr) => {
-          if (loginErr) return res.status(500).json({ message: "Login failed" });
-          void writeAudit(req, "login", { email: String(user.email) }, user.id as number);
-          const { password: _, apiKey: __, ...safeUser } = user;
-          return res.json(
-            scrubValue({
-              ...safeUser,
-              security: {
-                riskScore: risk.score,
-                captchaRequired: risk.requireCaptcha,
-                otpRequired: risk.requireOtp,
-                blockedForReview: risk.blockedForReview,
-              },
-            }),
-          );
-        });
-      })().catch((e) => res.status(500).json({ message: safeError(e) }));
-    })(req, res, next);
-  });
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        await storage.updateUserPassword(user.id, hashedPassword);
+        await storage.clearUserPasswordReset(user.id);
+        await writeAudit(req, "password_reset", { stage: "completed" }, user.id);
+        res.json({ message: "Password updated" });
+      } catch (err: any) {
+        res.status(500).json({ message: safeError(err) });
+      }
+    },
+  );
+
+  app.post(
+    "/api/auth/login",
+    authLimiter,
+    verifyTurnstile(),
+    validateBody(loginBodySchema),
+    (req, res, next) => {
+      passport.authenticate(
+        "local",
+        (err: unknown, user: false | User | undefined, _info: { message?: string }) => {
+          void (async () => {
+            if (err) return res.status(500).json({ message: safeError(err) });
+            const fpPayload = extractFingerprintPayload(req);
+            const fingerprintHash = computeFingerprintHash(fpPayload);
+            const email = String((req.body || {}).email || "");
+            if (!user) {
+              const failedRisk = await assessRisk({
+                email,
+                fingerprintHash,
+                ipAddress: fpPayload.ipAddress,
+                country: fpPayload.country,
+                asn: fpPayload.asn,
+              });
+              await recordLoginEvent({
+                userId: null,
+                email,
+                eventType: "login_failed",
+                fingerprintHash,
+                ipAddress: fpPayload.ipAddress,
+                asn: fpPayload.asn,
+                country: fpPayload.country,
+                riskScore: failedRisk.score,
+                reasons: failedRisk.reasons,
+              });
+              return res.status(401).json({ message: "Invalid credentials." });
+            }
+
+            const risk = await assessRisk({
+              userId: user.id as number,
+              email: String(user.email),
+              fingerprintHash,
+              ipAddress: fpPayload.ipAddress,
+              country: fpPayload.country,
+              asn: fpPayload.asn,
+            });
+            await recordLoginEvent({
+              userId: user.id as number,
+              email: String(user.email),
+              eventType: "login_success",
+              fingerprintHash,
+              ipAddress: fpPayload.ipAddress,
+              asn: fpPayload.asn,
+              country: fpPayload.country,
+              riskScore: risk.score,
+              reasons: risk.reasons,
+            });
+            if (risk.blockedForReview) {
+              await recordAbuseEvent({
+                userId: user.id as number,
+                ip: fpPayload.ipAddress,
+                fingerprintHash,
+                eventType: "high_risk_login_block_review",
+                details: { score: risk.score, reasons: risk.reasons },
+              });
+            }
+            req.login(user, (loginErr) => {
+              if (loginErr) return res.status(500).json({ message: "Login failed" });
+              void writeAudit(req, "login", { email: String(user.email) }, user.id as number);
+              const { password: _, apiKey: __, ...safeUser } = user;
+              return res.json(
+                scrubValue({
+                  ...safeUser,
+                  security: {
+                    riskScore: risk.score,
+                    captchaRequired: risk.requireCaptcha,
+                    otpRequired: risk.requireOtp,
+                    blockedForReview: risk.blockedForReview,
+                  },
+                }),
+              );
+            });
+          })().catch((e) => res.status(500).json({ message: safeError(e) }));
+        },
+      )(req, res, next);
+    },
+  );
 
   app.post("/api/auth/logout", (req, res) => {
     const uid = (req.user as { id: number } | undefined)?.id;
@@ -803,7 +889,9 @@ export async function registerRoutes(
         const idemStorageKey = `${user.id}:${idempotencyKey}`;
         const cached = await getIdempotencyRecord(idemStorageKey);
         if (cached && cached.bodyHash === idemBodyHash) {
-          return res.status(cached.statusCode).json(JSON.parse(cached.responseBody) as Record<string, unknown>);
+          return res
+            .status(cached.statusCode)
+            .json(JSON.parse(cached.responseBody) as Record<string, unknown>);
         }
       }
 
@@ -839,7 +927,10 @@ export async function registerRoutes(
       const balanceUsdc = await withProviderCircuit("circle", "check_wallet_balance", () =>
         getUserUsdcBalance(walletId),
       );
-      if (!bundleCredit && (balanceUsdc < Number.parseFloat(yourPrice) || parseAmountToCents(freshUser.balance) < amountCents)) {
+      if (
+        !bundleCredit &&
+        (balanceUsdc < Number.parseFloat(yourPrice) || parseAmountToCents(freshUser.balance) < amountCents)
+      ) {
         return res.status(402).json({ message: "Insufficient balance." });
       }
 
@@ -863,25 +954,43 @@ export async function registerRoutes(
             metadata: { service: cleanService },
           });
 
-      let upstream: { activationId: string; phoneNumber: string; raw: string };
+      let upstream: { activationId: string; phoneNumber: string; providerSlug: string };
       try {
         if (!bundleCredit) {
-          await withProviderCircuit("circle", "transfer_user_to_master", () => transferFromUserToMaster(walletId, yourPrice), {
-            userId: user.id,
-            amountCents,
-          });
+          await withProviderCircuit(
+            "circle",
+            "transfer_user_to_master",
+            () => transferFromUserToMaster(walletId, yourPrice),
+            {
+              userId: user.id,
+              amountCents,
+            },
+          );
         }
-        upstream = await withProviderCircuit("tellabot", "buy_number", () => buyNumberFromTellabot(cleanService), {
+        // Route through the multi-provider router. Falls through to next provider
+        // on failure; emits an audit row when fallback fires. Old tellabot-only
+        // behavior is preserved as long as tellabot stays priority=1 enabled.
+        const routerResult = await routerBuyNumber(cleanService, {
           userId: user.id,
-          service: cleanService,
+          reqLike: req,
         });
+        upstream = {
+          activationId: routerResult.providerOrderId,
+          phoneNumber: routerResult.phoneNumber,
+          providerSlug: routerResult.provider.slug,
+        };
         if (bundleCredit) {
           await storage.decrementUserBundleCredit(bundleCredit.id);
         } else {
           await recordRevenueAndCost({
             transactionId: debit.transactionId,
             totalDebitCents: amountCents,
-            tellabotCostCents: amountCents,
+            // Blind-fallback quote may not know exact upstream cost yet.
+            // Use full debit as conservative COGS floor to avoid inflated profit.
+            tellabotCostCents:
+              typeof routerResult.costCents === "number" && routerResult.costCents > 0
+                ? routerResult.costCents
+                : amountCents,
           });
         }
       } catch (providerError) {
@@ -909,9 +1018,7 @@ export async function registerRoutes(
         userId: user.id,
         serviceId: matchedService.id,
         serviceName: matchedService.name,
-        phoneNumber: upstream.phoneNumber.startsWith("+")
-          ? upstream.phoneNumber
-          : `+${upstream.phoneNumber}`,
+        phoneNumber: upstream.phoneNumber.startsWith("+") ? upstream.phoneNumber : `+${upstream.phoneNumber}`,
         status: "waiting",
         otpCode: null,
         smsMessages: null,
@@ -920,6 +1027,7 @@ export async function registerRoutes(
         activationId: upstream.activationId,
         tellabotMdn: null,
         costPrice: null,
+        providerSlug: upstream.providerSlug,
         createdAt: now.toISOString(),
         expiresAt: expiresAt.toISOString(),
         completedAt: null,
@@ -937,7 +1045,11 @@ export async function registerRoutes(
 
       return res.json(responsePayload);
     } catch (err: any) {
-      if (String(err?.message || "").toLowerCase().includes("insufficient")) {
+      if (
+        String(err?.message || "")
+          .toLowerCase()
+          .includes("insufficient")
+      ) {
         return res.status(402).json({ message: "Insufficient funds" });
       }
       return res.status(500).json({ message: safeError(err) });
@@ -959,14 +1071,14 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Order has no active upstream reservation" });
       }
 
-      const code = await waitForSmsCode(order.activationId);
-      if (code) {
-        await storage.updateOrderStatus(order.id, "completed", code);
-        return res.json({ code, refunded: false });
+      const sms = await routerCheckSms(order.providerSlug || "tellabot", order.activationId);
+      if (sms.status === "received" && sms.otpCode) {
+        await storage.updateOrderStatus(order.id, "completed", sms.otpCode);
+        return res.json({ code: sms.otpCode, refunded: false, provider: order.providerSlug || "tellabot" });
       }
 
       await storage.updateOrderStatus(order.id, "failed");
-      await cancelTellabotNumber(order.activationId);
+      await routerCancelOrder(order.providerSlug || "tellabot", order.activationId);
       await creditUser({
         userId: user.id,
         amountCents: parseAmountToCents(order.price),
@@ -987,10 +1099,10 @@ export async function registerRoutes(
       // Fetch fresh from TellaBot (cached 5 min)
       const tellabotServices = await fetchTellabotServices();
       const dbServices = await storage.getAllServices();
-      
+
       // Merge TellaBot availability with DB services
       const tellabotMap = new Map(tellabotServices.map((s: any) => [s.name, s]));
-      const enriched = dbServices.map(svc => {
+      const enriched = dbServices.map((svc) => {
         const tb = tellabotMap.get(svc.name);
         return {
           ...svc,
@@ -1012,7 +1124,8 @@ export async function registerRoutes(
     try {
       const user = req.user as any;
       const { serviceId, serviceName } = req.body;
-      if (!serviceId && !serviceName) return res.status(400).json({ message: "serviceId or serviceName required" });
+      if (!serviceId && !serviceName)
+        return res.status(400).json({ message: "serviceId or serviceName required" });
 
       // Find service from DB
       let service;
@@ -1031,26 +1144,8 @@ export async function registerRoutes(
       const price = parseFloat(service.price);
       if (balance < price) return res.status(400).json({ message: "Insufficient balance" });
 
-      // Request real number from TellaBot
-      const tbResult = await tellabotAPI("request", { service: service.name });
-      
-      if (tbResult.status !== "ok" || !tbResult.message || !Array.isArray(tbResult.message)) {
-        return res.status(503).json({ 
-          message: tbResult.message || "No numbers available for this service. Try again later." 
-        });
-      }
-
-      const tbData = tbResult.message[0];
-      const tellabotRequestId = tbData.id;
-      const mdn = tbData.mdn;
-
-      if (!mdn) {
-        // Priority request — awaiting MDN
-        return res.status(503).json({ message: "No numbers available right now. Try again shortly." });
-      }
-
-      // Format phone number
-      const phoneNumber = mdn.startsWith("+") ? mdn : `+${mdn}`;
+      const route = await routerBuyNumber(service.name, { userId: user.id, reqLike: req });
+      const phoneNumber = route.phoneNumber;
 
       // Atomic: deduct balance + create order + create transaction
       const now = new Date();
@@ -1074,8 +1169,10 @@ export async function registerRoutes(
           otpCode: null,
           smsMessages: null,
           price: service.price,
-          tellabotRequestId,
-          tellabotMdn: mdn,
+          tellabotRequestId: null,
+          activationId: route.providerOrderId,
+          tellabotMdn: null,
+          providerSlug: route.provider.slug,
           createdAt: now.toISOString(),
           expiresAt: expiresAt.toISOString(),
           completedAt: null,
@@ -1123,6 +1220,42 @@ export async function registerRoutes(
     res.json(sanitizeOrderForClient(order));
   });
 
+  app.get("/api/orders/:id/stream", requireAuth, async (req, res) => {
+    const user = req.user as any;
+    const orderId = Number(req.params.id);
+    if (!Number.isFinite(orderId)) return res.status(400).end();
+    const order = await storage.getOrder(orderId);
+    if (!order) return res.status(404).end();
+    if (order.userId !== user.id && user.role !== "admin") return res.status(403).end();
+
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+
+    const send = async (): Promise<void> => {
+      const current = await storage.getOrder(orderId);
+      if (!current) {
+        res.write(`event: end\ndata: ${JSON.stringify({ orderId, status: "missing" })}\n\n`);
+        res.end();
+        return;
+      }
+      const payload = sanitizeOrderForClient(current);
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      if (["completed", "received", "failed", "cancelled", "canceled"].includes(String(current.status))) {
+        res.write("event: end\ndata: done\n\n");
+        res.end();
+      }
+    };
+
+    void send();
+    const timer = setInterval(() => void send(), 3000);
+    req.on("close", () => {
+      clearInterval(timer);
+      res.end();
+    });
+  });
+
   // Check for SMS — calls TellaBot read_sms
   app.post("/api/orders/:id/check-sms", requireAuth, async (req, res) => {
     try {
@@ -1132,39 +1265,27 @@ export async function registerRoutes(
       if (order.userId !== user.id) return res.status(403).json({ message: "Forbidden" });
       if (order.status !== "waiting") return res.status(400).json({ message: "Order not in waiting state" });
 
-      if (!order.tellabotRequestId) {
+      const providerOrderId = order.activationId || order.tellabotRequestId;
+      if (!providerOrderId) {
         return res.status(400).json({ message: "No provider request linked" });
       }
-
-      const tbResult = await tellabotAPI("read_sms", { id: order.tellabotRequestId });
-
-      if (tbResult.status === "error") {
-        // "No messages" is normal — still waiting
-        return res.json({ status: "waiting", messages: [], otpCode: null });
-      }
-
-      if (tbResult.status === "ok" && Array.isArray(tbResult.message)) {
-        const messages = tbResult.message;
-        const smsJson = JSON.stringify(messages);
-        
-        // Try to extract OTP from latest message
-        let otpCode: string | null = null;
-        for (const msg of messages) {
-          const code = extractOTPFromText(msg.text || "");
-          if (code) { otpCode = code; break; }
-        }
-
-        await storage.updateOrderSms(order.id, smsJson, otpCode || undefined);
-
+      const sms = await routerCheckSms(order.providerSlug || "tellabot", providerOrderId);
+      if (sms.status === "received") {
+        await storage.updateOrderSms(order.id, JSON.stringify(sms.messages), sms.otpCode);
+        if (sms.otpCode) await storage.updateOrderStatus(order.id, "completed", sms.otpCode);
         return res.json({
           status: "received",
-          messages,
-          otpCode,
-          fullText: messages.map((m: any) => m.text).join("\n"),
+          messages: sms.messages,
+          otpCode: sms.otpCode || null,
+          provider: order.providerSlug || "tellabot",
         });
       }
-
-      res.json({ status: "waiting", messages: [], otpCode: null });
+      res.json({
+        status: "waiting",
+        messages: sms.messages,
+        otpCode: null,
+        provider: order.providerSlug || "tellabot",
+      });
     } catch (err: any) {
       console.error("Check SMS error:", err);
       res.status(500).json({ message: safeError(err) });
@@ -1184,7 +1305,13 @@ export async function registerRoutes(
       if (order.status !== "waiting") return res.status(400).json({ message: "Order not in waiting state" });
 
       const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-      const fakeMessage = [{ timestamp: Math.floor(Date.now()/1000).toString(), sender: "12345", text: `Your verification code is: ${otpCode}` }];
+      const fakeMessage = [
+        {
+          timestamp: Math.floor(Date.now() / 1000).toString(),
+          sender: "12345",
+          text: `Your verification code is: ${otpCode}`,
+        },
+      ];
       await storage.updateOrderSms(order.id, JSON.stringify(fakeMessage), otpCode);
 
       res.json({ otpCode, message: "SMS simulated", messages: fakeMessage });
@@ -1201,13 +1328,9 @@ export async function registerRoutes(
       if (order.userId !== user.id) return res.status(403).json({ message: "Forbidden" });
       if (order.status !== "waiting") return res.status(400).json({ message: "Cannot cancel this order" });
 
-      // Reject on TellaBot side
-      if (order.tellabotRequestId) {
-        try {
-          await tellabotAPI("reject", { id: order.tellabotRequestId });
-        } catch (e) {
-          console.error("TellaBot reject error:", e);
-        }
+      const providerOrderId = order.activationId || order.tellabotRequestId;
+      if (providerOrderId) {
+        await routerCancelOrder(order.providerSlug || "tellabot", providerOrderId);
       }
 
       await runTransaction(async () => {
@@ -1246,7 +1369,20 @@ export async function registerRoutes(
     const currencies = Object.entries(CRYPTO_WALLETS).map(([key, address]) => ({
       id: key,
       name: key === "USDT_TRC20" ? "USDT (TRC20)" : key === "USDT_ERC20" ? "USDT (ERC20)" : key,
-      network: key === "BTC" ? "Bitcoin" : key === "ETH" ? "Ethereum" : key === "USDT_TRC20" ? "Tron" : key === "USDT_ERC20" ? "Ethereum" : key === "USDC" ? "Ethereum" : key === "LTC" ? "Litecoin" : "",
+      network:
+        key === "BTC"
+          ? "Bitcoin"
+          : key === "ETH"
+            ? "Ethereum"
+            : key === "USDT_TRC20"
+              ? "Tron"
+              : key === "USDT_ERC20"
+                ? "Ethereum"
+                : key === "USDC"
+                  ? "Ethereum"
+                  : key === "LTC"
+                    ? "Litecoin"
+                    : "",
       address,
       rate: CRYPTO_RATES[key],
     }));
@@ -1323,38 +1459,53 @@ export async function registerRoutes(
     verifyTurnstile(),
     validateBody(createDepositBodySchema),
     async (req, res) => {
-    try {
-      const user = req.user as any;
-      const { currency, amount } = req.body as { currency: string; amount: string };
-      if (!currency || !amount) return res.status(400).json({ message: "Currency and amount are required" });
-      const usdAmount = parseFloat(amount);
-      if (isNaN(usdAmount) || usdAmount < 1) return res.status(400).json({ message: "Minimum deposit is $1.00" });
-      const walletAddress = CRYPTO_WALLETS[currency];
-      if (!walletAddress) return res.status(400).json({ message: "Unsupported currency" });
-      const rate = CRYPTO_RATES[currency];
-      const cryptoAmount = (usdAmount / rate).toFixed(8);
-      const now = new Date();
-      const expiresAt = new Date(now.getTime() + 60 * 60 * 1000);
+      try {
+        const user = req.user as any;
+        const { currency, amount } = req.body as { currency: string; amount: string };
+        if (!currency || !amount)
+          return res.status(400).json({ message: "Currency and amount are required" });
+        const usdAmount = parseFloat(amount);
+        if (isNaN(usdAmount) || usdAmount < 1)
+          return res.status(400).json({ message: "Minimum deposit is $1.00" });
+        const walletAddress = CRYPTO_WALLETS[currency];
+        if (!walletAddress) return res.status(400).json({ message: "Unsupported currency" });
+        const rate = CRYPTO_RATES[currency];
+        const cryptoAmount = (usdAmount / rate).toFixed(8);
+        const now = new Date();
+        const expiresAt = new Date(now.getTime() + 60 * 60 * 1000);
 
-      // For USDT TRC20: generate a unique amount for auto-matching
-      let uniqueAmount: string | null = null;
-      if (currency === "USDT_TRC20") {
-        uniqueAmount = await generateUniqueUsdtAmount(usdAmount);
+        // For USDT TRC20: generate a unique amount for auto-matching
+        let uniqueAmount: string | null = null;
+        if (currency === "USDT_TRC20") {
+          uniqueAmount = await generateUniqueUsdtAmount(usdAmount);
+        }
+
+        const deposit = await storage.createCryptoDeposit({
+          userId: user.id,
+          currency,
+          amount: usdAmount.toFixed(2),
+          cryptoAmount: currency === "USDT_TRC20" ? uniqueAmount! : cryptoAmount,
+          uniqueAmount,
+          walletAddress,
+          txHash: null,
+          trongridTxId: null,
+          confirmedAmount: null,
+          status: "pending",
+          createdAt: now.toISOString(),
+          expiresAt: expiresAt.toISOString(),
+          completedAt: null,
+        });
+        await writeAudit(req, "deposit_create", {
+          depositId: deposit.id,
+          currency,
+          amount: usdAmount.toFixed(2),
+        });
+        res.json(deposit);
+      } catch (err: any) {
+        res.status(500).json({ message: safeError(err) });
       }
-
-      const deposit = await storage.createCryptoDeposit({
-        userId: user.id, currency, amount: usdAmount.toFixed(2),
-        cryptoAmount: currency === "USDT_TRC20" ? uniqueAmount! : cryptoAmount,
-        uniqueAmount,
-        walletAddress, txHash: null,
-        trongridTxId: null, confirmedAmount: null,
-        status: "pending",
-        createdAt: now.toISOString(), expiresAt: expiresAt.toISOString(), completedAt: null,
-      });
-      await writeAudit(req, "deposit_create", { depositId: deposit.id, currency, amount: usdAmount.toFixed(2) });
-      res.json(deposit);
-    } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
-  });
+    },
+  );
 
   // Financial alias endpoint retained for strict idempotency middleware path coverage.
   app.post("/api/deposit", requireAuth, async (req, res) => {
@@ -1371,16 +1522,20 @@ export async function registerRoutes(
     try {
       const user = req.user as any;
       const { txHash } = req.body;
-      if (!txHash || typeof txHash !== "string") return res.status(400).json({ message: "Transaction hash is required" });
+      if (!txHash || typeof txHash !== "string")
+        return res.status(400).json({ message: "Transaction hash is required" });
       const trimmedHash = txHash.trim();
-      if (trimmedHash.length < 10 || trimmedHash.length > 128) return res.status(400).json({ message: "Invalid transaction hash format" });
+      if (trimmedHash.length < 10 || trimmedHash.length > 128)
+        return res.status(400).json({ message: "Invalid transaction hash format" });
       const deposit = await storage.getCryptoDeposit(Number(req.params.id));
       if (!deposit) return res.status(404).json({ message: "Deposit not found" });
       if (deposit.userId !== user.id) return res.status(403).json({ message: "Forbidden" });
       if (deposit.status !== "pending") return res.status(400).json({ message: "Deposit is not pending" });
       await storage.updateCryptoDeposit(deposit.id, { txHash: trimmedHash, status: "confirming" });
       res.json({ message: "Transaction hash submitted. Awaiting confirmation." });
-    } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
+    } catch (err: any) {
+      res.status(500).json({ message: safeError(err) });
+    }
   });
 
   app.post("/api/crypto/:id/simulate-confirm", requireAuth, async (req, res) => {
@@ -1392,7 +1547,8 @@ export async function registerRoutes(
       const deposit = await storage.getCryptoDeposit(Number(req.params.id));
       if (!deposit) return res.status(404).json({ message: "Deposit not found" });
       if (deposit.userId !== user.id) return res.status(403).json({ message: "Forbidden" });
-      if (deposit.status !== "confirming") return res.status(400).json({ message: "Deposit must be in confirming state" });
+      if (deposit.status !== "confirming")
+        return res.status(400).json({ message: "Deposit must be in confirming state" });
       // Atomic: complete deposit + credit balance + create transaction
       const now = new Date().toISOString();
       await runTransaction(async () => {
@@ -1406,7 +1562,9 @@ export async function registerRoutes(
         metadata: { depositId: deposit.id, currency: deposit.currency },
       });
       res.json({ message: "Deposit confirmed", newBalance: (credit.newBalanceCents / 100).toFixed(2) });
-    } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
+    } catch (err: any) {
+      res.status(500).json({ message: safeError(err) });
+    }
   });
 
   // ========== ADMIN 2FA ==========
@@ -1511,7 +1669,9 @@ export async function registerRoutes(
         metadata: { depositId: deposit.id, adminId: (req.user as any).id },
       });
       res.json({ message: "Deposit confirmed and balance credited" });
-    } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
+    } catch (err: any) {
+      res.status(500).json({ message: safeError(err) });
+    }
   });
 
   app.get("/api/admin/crypto/pending", requireAdmin, requireAdmin2FAIfEnabled, async (_req, res) => {
@@ -1534,17 +1694,57 @@ export async function registerRoutes(
     res.json(allUsers.map(({ password: _, apiKey: __, ...u }) => u));
   });
 
+  app.get("/api/admin/providers", requireAdmin, requireAdmin2FAIfEnabled, async (_req, res) => {
+    const known = listKnownProviders().map((p) => ({ slug: p.slug, displayName: p.displayName }));
+    const rows = await pool
+      .query(
+        `SELECT id, slug, name, enabled, priority, last_health_at AS "lastHealthAt",
+              last_balance_cents AS "lastBalanceCents", last_error AS "lastError", updated_at AS "updatedAt"
+       FROM providers
+       ORDER BY priority ASC, id ASC`,
+      )
+      .catch(() => ({ rows: [] as any[] }));
+    res.json({ providers: rows.rows, known });
+  });
+
+  app.patch("/api/admin/providers/:slug", requireAdmin, requireAdmin2FAIfEnabled, async (req, res) => {
+    const slug = String(req.params.slug || "").toLowerCase();
+    const { enabled, priority } = req.body as { enabled?: boolean; priority?: number };
+    const updates: string[] = [];
+    const values: unknown[] = [];
+    let i = 1;
+    if (typeof enabled === "boolean") {
+      updates.push(`enabled = $${i++}`);
+      values.push(enabled);
+    }
+    if (typeof priority === "number" && Number.isFinite(priority)) {
+      updates.push(`priority = $${i++}`);
+      values.push(Math.max(1, Math.trunc(priority)));
+    }
+    if (updates.length === 0) return res.status(400).json({ message: "No valid fields to update" });
+    values.push(slug);
+    const result = await pool
+      .query(
+        `UPDATE providers SET ${updates.join(", ")}, updated_at = NOW() WHERE slug = $${i} RETURNING *`,
+        values,
+      )
+      .catch(() => null);
+    if (!result || result.rowCount === 0) return res.status(404).json({ message: "Provider not found" });
+    await writeAudit(req, "provider_update", { slug, enabled, priority }, (req.user as any)?.id);
+    res.json(result.rows[0]);
+  });
+
   app.get("/api/admin/stats", requireAdmin, requireAdmin2FAIfEnabled, async (_req, res) => {
     const allUsers = await storage.getAllUsers();
     const allOrders = await storage.getAllOrders();
-    const completedOrders = allOrders.filter(o => o.status === "completed" || o.status === "received");
+    const completedOrders = allOrders.filter((o) => o.status === "completed" || o.status === "received");
     const revenue = completedOrders.reduce((sum, o) => sum + parseFloat(o.price), 0);
     const cost = revenue / MARKUP_MULTIPLIER;
     const profit = revenue - cost;
 
     // Total crypto deposits (completed only)
     const allDeposits = await storage.getAllCryptoDeposits();
-    const completedDeposits = allDeposits.filter(d => d.status === "completed");
+    const completedDeposits = allDeposits.filter((d) => d.status === "completed");
     const totalDeposited = completedDeposits.reduce((sum, d) => sum + parseFloat(d.amount), 0);
 
     // Check SMS provider balance (masked name)
@@ -1553,6 +1753,68 @@ export async function registerRoutes(
       const tbBal = await tellabotAPI("balance");
       if (tbBal.status === "ok") smsProviderBalance = `$${tbBal.message}`;
     } catch (e) {}
+
+    const dailyRevenueRows = await pool
+      .query<{ day: string; revenue: string; profit: string }>(
+        `SELECT date(created_at::timestamptz) AS day,
+              SUM(CASE WHEN status IN ('completed','received') THEN price::numeric ELSE 0 END) AS revenue,
+              SUM(CASE WHEN status IN ('completed','received') THEN (price::numeric - COALESCE(cost_price::numeric, price::numeric / $1::numeric)) ELSE 0 END) AS profit
+       FROM orders
+       WHERE created_at::timestamptz >= NOW() - INTERVAL '30 days'
+       GROUP BY 1
+       ORDER BY 1 ASC`,
+        [MARKUP_MULTIPLIER],
+      )
+      .catch(() => ({ rows: [] as { day: string; revenue: string; profit: string }[] }));
+    const profitByServiceRows = await pool
+      .query<{ service: string; revenue: string; profit: string }>(
+        `SELECT service_name AS service,
+              SUM(CASE WHEN status IN ('completed','received') THEN price::numeric ELSE 0 END) AS revenue,
+              SUM(CASE WHEN status IN ('completed','received') THEN (price::numeric - COALESCE(cost_price::numeric, price::numeric / $1::numeric)) ELSE 0 END) AS profit
+       FROM orders
+       GROUP BY service_name
+       ORDER BY revenue DESC`,
+        [MARKUP_MULTIPLIER],
+      )
+      .catch(() => ({ rows: [] as { service: string; revenue: string; profit: string }[] }));
+    const providerMarginRows = await pool
+      .query<{ provider: string; revenue: string; profit: string; count: string }>(
+        `SELECT COALESCE(provider_slug, 'tellabot') AS provider,
+              COUNT(*)::text AS count,
+              SUM(CASE WHEN status IN ('completed','received') THEN price::numeric ELSE 0 END) AS revenue,
+              SUM(CASE WHEN status IN ('completed','received') THEN (price::numeric - COALESCE(cost_price::numeric, price::numeric / $1::numeric)) ELSE 0 END) AS profit
+       FROM orders
+       GROUP BY 1
+       ORDER BY revenue DESC`,
+        [MARKUP_MULTIPLIER],
+      )
+      .catch(() => ({ rows: [] as { provider: string; revenue: string; profit: string; count: string }[] }));
+
+    const totalSignups = allUsers.length;
+    const depositUsers = new Set(completedDeposits.map((d) => d.userId)).size;
+    const orderUsers = new Set(allOrders.map((o) => o.userId)).size;
+    const completedOrderUsers = new Set(completedOrders.map((o) => o.userId)).size;
+    const retention30Rows = await pool
+      .query<{ retained: string }>(
+        `SELECT COUNT(*)::text AS retained
+       FROM users u
+       WHERE u.created_at::timestamptz <= NOW() - INTERVAL '30 days'
+         AND EXISTS (
+           SELECT 1 FROM orders o
+           WHERE o.user_id = u.id
+             AND o.created_at::timestamptz >= u.created_at::timestamptz + INTERVAL '30 days'
+         )`,
+      )
+      .catch(() => ({ rows: [{ retained: "0" }] }));
+    const cohort30Rows = await pool
+      .query<{ cohort: string }>(
+        `SELECT COUNT(*)::text AS cohort
+       FROM users
+       WHERE created_at::timestamptz <= NOW() - INTERVAL '30 days'`,
+      )
+      .catch(() => ({ rows: [{ cohort: "0" }] }));
+    const retained = parseInt(retention30Rows.rows[0]?.retained || "0", 10);
+    const cohort = parseInt(cohort30Rows.rows[0]?.cohort || "0", 10);
     res.json({
       totalUsers: allUsers.length,
       totalOrders: allOrders.length,
@@ -1562,13 +1824,198 @@ export async function registerRoutes(
       profit: profit.toFixed(2),
       markupMultiplier: MARKUP_MULTIPLIER,
       totalDeposited: totalDeposited.toFixed(2),
-      pendingDeposits: allDeposits.filter(d => d.status === "pending" || d.status === "confirming").length,
+      pendingDeposits: allDeposits.filter((d) => d.status === "pending" || d.status === "confirming").length,
       smsProviderBalance,
+      dailyRevenue: dailyRevenueRows.rows,
+      profitByService: profitByServiceRows.rows,
+      providerMargin: providerMarginRows.rows,
+      conversionFunnel: {
+        signups: totalSignups,
+        depositUsers,
+        orderUsers,
+        completedOrderUsers,
+      },
+      retention30d: {
+        retainedUsers: retained,
+        eligibleUsers: cohort,
+        ratePct: cohort > 0 ? Number(((retained / cohort) * 100).toFixed(2)) : 0,
+      },
       providerStatus: {
         smsProvider: "Online",
         walletProvider: "Online",
       },
     });
+  });
+
+  app.get("/api/admin/orders", requireAdmin, requireAdmin2FAIfEnabled, async (_req, res) => {
+    const orders = await storage.getAllOrders();
+    res.json(orders);
+  });
+
+  app.get("/api/admin/deposits", requireAdmin, requireAdmin2FAIfEnabled, async (_req, res) => {
+    const deposits = await storage.getAllCryptoDeposits();
+    res.json(deposits);
+  });
+
+  app.get("/api/admin/bundles", requireAdmin, requireAdmin2FAIfEnabled, async (_req, res) => {
+    const bundles = await pool
+      .query(
+        `SELECT id, amount_usd AS "amountUsd", bonus_usd AS "bonusUsd", active, sort_order AS "sortOrder", updated_at AS "updatedAt"
+         FROM deposit_bundles ORDER BY sort_order ASC, id ASC`,
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    res.json(bundles);
+  });
+
+  app.patch("/api/admin/bundles/:id", requireAdmin, requireAdmin2FAIfEnabled, async (req, res) => {
+    const id = Number(req.params.id);
+    const { amountUsd, bonusUsd, active, sortOrder } = req.body as {
+      amountUsd?: string;
+      bonusUsd?: string;
+      active?: boolean;
+      sortOrder?: number;
+    };
+    const updates: string[] = [];
+    const values: unknown[] = [];
+    let i = 1;
+    if (amountUsd !== undefined) {
+      updates.push(`amount_usd = $${i++}`);
+      values.push(String(amountUsd));
+    }
+    if (bonusUsd !== undefined) {
+      updates.push(`bonus_usd = $${i++}`);
+      values.push(String(bonusUsd));
+    }
+    if (active !== undefined) {
+      updates.push(`active = $${i++}`);
+      values.push(!!active);
+    }
+    if (sortOrder !== undefined) {
+      updates.push(`sort_order = $${i++}`);
+      values.push(Math.max(0, Math.trunc(Number(sortOrder))));
+    }
+    if (updates.length === 0) return res.status(400).json({ message: "No updates provided" });
+    values.push(id);
+    const out = await pool.query(
+      `UPDATE deposit_bundles SET ${updates.join(", ")}, updated_at = NOW() WHERE id = $${i} RETURNING *`,
+      values,
+    );
+    if (out.rowCount === 0) return res.status(404).json({ message: "Bundle not found" });
+    res.json(out.rows[0]);
+  });
+
+  app.get("/api/admin/referrals", requireAdmin, requireAdmin2FAIfEnabled, async (_req, res) => {
+    const rows = await pool
+      .query(
+        `SELECT ref_by AS "referrerId", COUNT(*)::int AS "referredCount"
+         FROM users
+         WHERE ref_by IS NOT NULL
+         GROUP BY ref_by
+         ORDER BY "referredCount" DESC`,
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    res.json(rows);
+  });
+
+  app.get("/api/admin/api-plans", requireAdmin, requireAdmin2FAIfEnabled, async (_req, res) => {
+    const plans = await pool
+      .query(
+        `SELECT id, name, monthly_price_cents AS "monthlyPriceCents", rate_limit_per_min AS "rateLimitPerMin", discount_pct AS "discountPct", active
+         FROM api_plans ORDER BY monthly_price_cents ASC, id ASC`,
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    res.json(plans);
+  });
+
+  app.patch("/api/admin/api-plans/:id", requireAdmin, requireAdmin2FAIfEnabled, async (req, res) => {
+    const id = Number(req.params.id);
+    const { name, monthlyPriceCents, rateLimitPerMin, discountPct, active } = req.body as {
+      name?: string;
+      monthlyPriceCents?: number;
+      rateLimitPerMin?: number;
+      discountPct?: number;
+      active?: boolean;
+    };
+    const updates: string[] = [];
+    const values: unknown[] = [];
+    let i = 1;
+    if (name !== undefined) {
+      updates.push(`name = $${i++}`);
+      values.push(name);
+    }
+    if (monthlyPriceCents !== undefined) {
+      updates.push(`monthly_price_cents = $${i++}`);
+      values.push(Math.max(0, Math.trunc(monthlyPriceCents)));
+    }
+    if (rateLimitPerMin !== undefined) {
+      updates.push(`rate_limit_per_min = $${i++}`);
+      values.push(Math.max(1, Math.trunc(rateLimitPerMin)));
+    }
+    if (discountPct !== undefined) {
+      updates.push(`discount_pct = $${i++}`);
+      values.push(Math.max(0, Math.min(100, Math.trunc(discountPct))));
+    }
+    if (active !== undefined) {
+      updates.push(`active = $${i++}`);
+      values.push(!!active);
+    }
+    if (updates.length === 0) return res.status(400).json({ message: "No updates provided" });
+    values.push(id);
+    const out = await pool.query(
+      `UPDATE api_plans SET ${updates.join(", ")} WHERE id = $${i} RETURNING *`,
+      values,
+    );
+    if (out.rowCount === 0) return res.status(404).json({ message: "Plan not found" });
+    res.json(out.rows[0]);
+  });
+
+  app.get("/api/admin/audit-logs", requireAdmin, requireAdmin2FAIfEnabled, async (_req, res) => {
+    const rows = await pool
+      .query(
+        `SELECT id, actor_user_id AS "actorUserId", action, target, details, created_at AS "createdAt"
+         FROM audit_log
+         ORDER BY id DESC
+         LIMIT 1000`,
+      )
+      .then((r) => r.rows)
+      .catch(() => []);
+    res.json(rows);
+  });
+
+  app.get("/api/admin/export/:resource", requireAdmin, requireAdmin2FAIfEnabled, async (req, res) => {
+    const resource = String(req.params.resource || "").toLowerCase();
+    const exportMap: Record<string, string> = {
+      users: `SELECT id, username, email, role, balance, status, created_at FROM users ORDER BY id DESC`,
+      orders: `SELECT id, user_id, service_name, phone_number, status, price, provider_slug, created_at FROM orders ORDER BY id DESC`,
+      deposits: `SELECT id, user_id, amount, tx_hash, status, created_at FROM crypto_deposits ORDER BY id DESC`,
+      services: `SELECT id, name, slug, price, is_active, created_at FROM services ORDER BY id DESC`,
+      providers: `SELECT id, slug, name, enabled, priority, last_health_at, last_balance_cents, last_error, updated_at FROM providers ORDER BY priority ASC, id ASC`,
+      bundles: `SELECT id, amount_usd, bonus_usd, active, sort_order, updated_at FROM deposit_bundles ORDER BY sort_order ASC, id ASC`,
+      referrals: `SELECT ref_by, COUNT(*) AS referred_count FROM users WHERE ref_by IS NOT NULL GROUP BY ref_by ORDER BY referred_count DESC`,
+      api_plans: `SELECT id, name, monthly_price_cents, rate_limit_per_min, discount_pct, active FROM api_plans ORDER BY monthly_price_cents ASC`,
+      audit_logs: `SELECT id, actor_user_id, action, target, details, created_at FROM audit_log ORDER BY id DESC LIMIT 5000`,
+    };
+    const sql = exportMap[resource];
+    if (!sql) return res.status(404).json({ message: "Export resource not found" });
+    const r = await pool.query(sql);
+    const rows = r.rows;
+    const headers = rows.length ? Object.keys(rows[0]) : [];
+    const encode = (v: unknown): string => {
+      const raw = v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+      return /[",\n]/.test(raw) ? `"${raw.replace(/"/g, '""')}"` : raw;
+    };
+    const csvLines: string[] = [];
+    if (headers.length > 0) {
+      csvLines.push(headers.join(","));
+      for (const row of rows)
+        csvLines.push(headers.map((h) => encode((row as Record<string, unknown>)[h])).join(","));
+    }
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename=\"${resource}-${Date.now()}.csv\"`);
+    res.send(csvLines.join("\n"));
   });
 
   app.put("/api/admin/services/:id", requireAdmin, requireAdmin2FAIfEnabled, async (req, res) => {
@@ -1583,10 +2030,13 @@ export async function registerRoutes(
       if (isActive !== undefined) {
         update.isActive = isActive ? 1 : 0;
       }
-      if (Object.keys(update).length === 0) return res.status(400).json({ message: "No valid fields to update" });
+      if (Object.keys(update).length === 0)
+        return res.status(400).json({ message: "No valid fields to update" });
       await storage.updateService(Number(req.params.id), update);
       res.json({ message: "Service updated" });
-    } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
+    } catch (err: any) {
+      res.status(500).json({ message: safeError(err) });
+    }
   });
 
   app.post("/api/admin/users/:id/add-balance", requireAdmin, requireAdmin2FAIfEnabled, async (req, res) => {
@@ -1602,23 +2052,26 @@ export async function registerRoutes(
       const targetUser = await storage.getUser(Number(req.params.id));
       if (!targetUser) return res.status(404).json({ message: "User not found" });
       const cents = parseAmountToCents(Math.abs(numAmount));
-      const result = numAmount > 0
-        ? await creditUser({
-            userId: targetUser.id,
-            amountCents: cents,
-            idempotencyKey: `admin-adjust:${targetUser.id}:${Date.now()}`,
-            type: "admin_credit",
-            metadata: { adminId: (req.user as any).id },
-          })
-        : await debitUserForPurchase({
-            userId: targetUser.id,
-            amountCents: cents,
-            idempotencyKey: `admin-adjust:${targetUser.id}:${Date.now()}`,
-            type: "admin_debit",
-            metadata: { adminId: (req.user as any).id },
-          });
+      const result =
+        numAmount > 0
+          ? await creditUser({
+              userId: targetUser.id,
+              amountCents: cents,
+              idempotencyKey: `admin-adjust:${targetUser.id}:${Date.now()}`,
+              type: "admin_credit",
+              metadata: { adminId: (req.user as any).id },
+            })
+          : await debitUserForPurchase({
+              userId: targetUser.id,
+              amountCents: cents,
+              idempotencyKey: `admin-adjust:${targetUser.id}:${Date.now()}`,
+              type: "admin_debit",
+              metadata: { adminId: (req.user as any).id },
+            });
       res.json({ message: "Balance updated", newBalance: (result.newBalanceCents / 100).toFixed(2) });
-    } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
+    } catch (err: any) {
+      res.status(500).json({ message: safeError(err) });
+    }
   });
 
   app.post("/api/webhooks/circle", async (req, res) => {
@@ -1635,7 +2088,10 @@ export async function registerRoutes(
     });
 
     if (!verification.ok) {
-      await sendFinancialAlert("critical", "webhook_signature_failed", { provider: "circle", reason: verification.reason });
+      await sendFinancialAlert("critical", "webhook_signature_failed", {
+        provider: "circle",
+        reason: verification.reason,
+      });
       return res.status(401).json({ message: "Invalid webhook signature" });
     }
 
@@ -1670,7 +2126,8 @@ export async function registerRoutes(
   app.post("/api/upgrade", requireAuth, async (req, res) => {
     const user = req.user as any;
     const { planId, billingCycle } = req.body as { planId?: string; billingCycle?: "monthly" | "annual" };
-    if (!planId || !billingCycle) return res.status(400).json({ message: "planId and billingCycle are required" });
+    if (!planId || !billingCycle)
+      return res.status(400).json({ message: "planId and billingCycle are required" });
     const planMap: Record<string, number> = {
       starter: 500,
       gold: 1200,
@@ -1709,7 +2166,7 @@ export async function registerRoutes(
   // ========== API v1 (API key auth) ==========
 
   async function requireApiKey(req: Request, res: Response, next: any) {
-    const key = req.headers["x-api-key"] as string || req.query.api_key as string;
+    const key = (req.headers["x-api-key"] as string) || (req.query.api_key as string);
     if (!key) return res.status(401).json({ error: "API key required" });
     const user = await storage.getUserByApiKey(key);
     if (!user) return res.status(401).json({ error: "Invalid API key" });
@@ -1779,7 +2236,9 @@ export async function registerRoutes(
       if (!service) return res.status(400).json({ error: "service name required" });
 
       const allServices = await storage.getAllServices();
-      const svc = allServices.find(s => s.name === service || s.slug === service || s.id === Number(service));
+      const svc = allServices.find(
+        (s) => s.name === service || s.slug === service || s.id === Number(service),
+      );
       if (!svc) return res.status(404).json({ error: "Service not found" });
 
       const freshUser = await storage.getUser(user.id);
@@ -1788,14 +2247,8 @@ export async function registerRoutes(
       const price = parseFloat(svc.price);
       if (balance < price) return res.status(400).json({ error: "Insufficient balance" });
 
-      // Call TellaBot
-      const tbResult = await tellabotAPI("request", { service: svc.name });
-      if (tbResult.status !== "ok" || !tbResult.message?.[0]?.mdn) {
-        return res.status(503).json({ error: tbResult.message || "No numbers available" });
-      }
-
-      const tbData = tbResult.message[0];
-      const phoneNumber = tbData.mdn.startsWith("+") ? tbData.mdn : `+${tbData.mdn}`;
+      const route = await routerBuyNumber(svc.name, { userId: user.id, reqLike: req });
+      const phoneNumber = route.phoneNumber;
 
       // Atomic: deduct balance + create order + create transaction
       const now = new Date();
@@ -1811,23 +2264,40 @@ export async function registerRoutes(
         await syncDb.updateUserBalance(user.id, newBalance);
 
         const ord = await syncDb.createOrder({
-          userId: user.id, serviceId: svc.id, serviceName: svc.name,
-          phoneNumber, status: "waiting", otpCode: null, smsMessages: null,
-          price: svc.price, tellabotRequestId: tbData.id, tellabotMdn: tbData.mdn,
-          createdAt: now.toISOString(), expiresAt: expiresAt.toISOString(), completedAt: null,
+          userId: user.id,
+          serviceId: svc.id,
+          serviceName: svc.name,
+          phoneNumber,
+          status: "waiting",
+          otpCode: null,
+          smsMessages: null,
+          price: svc.price,
+          tellabotRequestId: null,
+          activationId: route.providerOrderId,
+          tellabotMdn: null,
+          providerSlug: route.provider.slug,
+          createdAt: now.toISOString(),
+          expiresAt: expiresAt.toISOString(),
+          completedAt: null,
         });
 
         await syncDb.createTransaction({
-          userId: user.id, type: "purchase", amount: `-${svc.price}`,
-          description: `${svc.name} number rental`, orderId: ord.id,
-          paymentRef: null, createdAt: now.toISOString(),
+          userId: user.id,
+          type: "purchase",
+          amount: `-${svc.price}`,
+          description: `${svc.name} number rental`,
+          orderId: ord.id,
+          paymentRef: null,
+          createdAt: now.toISOString(),
         });
 
         return ord;
       });
 
       res.json({ orderId: order.id, phoneNumber, status: "waiting", expiresAt: order.expiresAt });
-    } catch (err: any) { res.status(500).json({ error: safeError(err) }); }
+    } catch (err: any) {
+      res.status(500).json({ error: safeError(err) });
+    }
   });
 
   app.get("/api/v1/order/:id", requireApiKey, async (req, res) => {
@@ -1835,32 +2305,33 @@ export async function registerRoutes(
     const order = await storage.getOrder(Number(req.params.id));
     if (!order) return res.status(404).json({ error: "Order not found" });
     if (order.userId !== user.id) return res.status(403).json({ error: "Forbidden" });
-    
+
     // Auto-check SMS if still waiting
-    if (order.status === "waiting" && order.tellabotRequestId) {
+    const providerOrderId = order.activationId || order.tellabotRequestId;
+    if (order.status === "waiting" && providerOrderId) {
       try {
-        const tbResult = await tellabotAPI("read_sms", { id: order.tellabotRequestId });
-        if (tbResult.status === "ok" && Array.isArray(tbResult.message) && tbResult.message.length > 0) {
-          const messages = tbResult.message;
-          let otpCode: string | null = null;
-          for (const msg of messages) {
-            const code = extractOTPFromText(msg.text || "");
-            if (code) { otpCode = code; break; }
-          }
-          await storage.updateOrderSms(order.id, JSON.stringify(messages), otpCode || undefined);
+        const sms = await routerCheckSms(order.providerSlug || "tellabot", providerOrderId);
+        if (sms.status === "received" && sms.messages.length > 0) {
+          await storage.updateOrderSms(order.id, JSON.stringify(sms.messages), sms.otpCode);
+          if (sms.otpCode) await storage.updateOrderStatus(order.id, "completed", sms.otpCode);
           return res.json({
-            orderId: order.id, phoneNumber: order.phoneNumber,
-            status: "received", otpCode,
-            messages: messages.map((m: any) => m.text),
+            orderId: order.id,
+            phoneNumber: order.phoneNumber,
+            status: "received",
+            otpCode: sms.otpCode || null,
+            messages: sms.messages.map((m: any) => m.text),
             expiresAt: order.expiresAt,
+            provider: order.providerSlug || "tellabot",
           });
         }
       } catch (e) {}
     }
 
     res.json({
-      orderId: order.id, phoneNumber: order.phoneNumber,
-      status: order.status, otpCode: order.otpCode,
+      orderId: order.id,
+      phoneNumber: order.phoneNumber,
+      status: order.status,
+      otpCode: order.otpCode,
       messages: order.smsMessages ? JSON.parse(order.smsMessages).map((m: any) => m.text) : [],
       expiresAt: order.expiresAt,
     });
@@ -1874,8 +2345,9 @@ export async function registerRoutes(
       if (order.userId !== user.id) return res.status(403).json({ error: "Forbidden" });
       if (order.status !== "waiting") return res.status(400).json({ error: "Cannot cancel" });
 
-      if (order.tellabotRequestId) {
-        try { await tellabotAPI("reject", { id: order.tellabotRequestId }); } catch (e) {}
+      const providerOrderId = order.activationId || order.tellabotRequestId;
+      if (providerOrderId) {
+        await routerCancelOrder(order.providerSlug || "tellabot", providerOrderId);
       }
 
       await storage.cancelOrder(order.id);
@@ -1885,7 +2357,9 @@ export async function registerRoutes(
         await storage.updateUserBalance(user.id, newBalance);
       }
       res.json({ message: "Order cancelled and refunded" });
-    } catch (err: any) { res.status(500).json({ error: safeError(err) }); }
+    } catch (err: any) {
+      res.status(500).json({ error: safeError(err) });
+    }
   });
 
   // Profile
@@ -1908,7 +2382,9 @@ export async function registerRoutes(
       const hashed = await bcrypt.hash(newPassword, 10);
       await storage.updateUserPassword(user.id, hashed);
       res.json({ message: "Password updated" });
-    } catch (err: any) { res.status(500).json({ message: safeError(err) }); }
+    } catch (err: any) {
+      res.status(500).json({ message: safeError(err) });
+    }
   });
 
   // ========== CHANGELOG ==========
@@ -1966,10 +2442,9 @@ export async function registerRoutes(
 
   app.get("/api/support", requireAuth, async (req, res) => {
     const user = req.user as any;
-    const { rows } = await pool.query(
-      "SELECT * FROM support_tickets WHERE user_id = $1 ORDER BY id DESC",
-      [user.id],
-    );
+    const { rows } = await pool.query("SELECT * FROM support_tickets WHERE user_id = $1 ORDER BY id DESC", [
+      user.id,
+    ]);
     res.json(rows);
   });
 
@@ -2031,25 +2506,37 @@ export async function registerRoutes(
     res.json(rows);
   });
 
-  app.post("/api/admin/abuse-events/:id/resolve", requireAdmin, requireAdmin2FAIfEnabled, async (req, res) => {
-    await pool.query("UPDATE abuse_events SET resolved_at = $1 WHERE id = $2", [
-      new Date().toISOString(),
-      Number(req.params.id),
-    ]);
-    res.json({ ok: true });
-  });
+  app.post(
+    "/api/admin/abuse-events/:id/resolve",
+    requireAdmin,
+    requireAdmin2FAIfEnabled,
+    async (req, res) => {
+      await pool.query("UPDATE abuse_events SET resolved_at = $1 WHERE id = $2", [
+        new Date().toISOString(),
+        Number(req.params.id),
+      ]);
+      res.json({ ok: true });
+    },
+  );
 
-  app.get("/api/admin/users/:id/linked-accounts", requireAdmin, requireAdmin2FAIfEnabled, async (req, res) => {
-    const linked = await getLinkedAccounts(Number(req.params.id));
-    res.json({ linkedAccounts: linked });
-  });
+  app.get(
+    "/api/admin/users/:id/linked-accounts",
+    requireAdmin,
+    requireAdmin2FAIfEnabled,
+    async (req, res) => {
+      const linked = await getLinkedAccounts(Number(req.params.id));
+      res.json({ linkedAccounts: linked });
+    },
+  );
 
   // Initial service sync on startup
-  fetchTellabotServices().then(() => {
-    console.log("TellaBot services synced");
-  }).catch(err => {
-    console.error("TellaBot initial sync failed:", err);
-  });
+  fetchTellabotServices()
+    .then(() => {
+      console.log("TellaBot services synced");
+    })
+    .catch((err) => {
+      console.error("TellaBot initial sync failed:", err);
+    });
 
   return httpServer;
 }

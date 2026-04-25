@@ -100,6 +100,8 @@ export const orders = pgTable(
     activationId: text("activation_id"),
     tellabotMdn: text("tellabot_mdn"),
     costPrice: text("cost_price"),
+    /** Which SMS provider fulfilled this order. NULL means legacy / unspecified. */
+    providerSlug: text("provider_slug").default("tellabot"),
     createdAt: text("created_at").notNull(),
     expiresAt: text("expires_at").notNull(),
     completedAt: text("completed_at"),
@@ -107,6 +109,7 @@ export const orders = pgTable(
   (t) => ({
     userStatus: index("idx_orders_user_status").on(t.userId, t.status),
     expiresStatus: index("idx_orders_expires_status").on(t.expiresAt, t.status),
+    providerIdx: index("idx_orders_provider_slug").on(t.providerSlug),
   }),
 );
 
@@ -435,17 +438,14 @@ export const analyticsEvents = pgTable(
   }),
 );
 
-export const servicePricing = pgTable(
-  "service_pricing",
-  {
-    id: serial("id").primaryKey(),
-    serviceName: text("service_name").notNull().unique(),
-    markup: text("markup").notNull(),
-    minPrice: text("min_price"),
-    maxPrice: text("max_price"),
-    updatedAt: text("updated_at").notNull(),
-  },
-);
+export const servicePricing = pgTable("service_pricing", {
+  id: serial("id").primaryKey(),
+  serviceName: text("service_name").notNull().unique(),
+  markup: text("markup").notNull(),
+  minPrice: text("min_price"),
+  maxPrice: text("max_price"),
+  updatedAt: text("updated_at").notNull(),
+});
 
 export const depositBundles = pgTable("deposit_bundles", {
   id: serial("id").primaryKey(),
@@ -500,3 +500,27 @@ export const providerHealth = pgTable("provider_health", {
   lastBalance: text("last_balance"),
   lastCheckedAt: text("last_checked_at"),
 });
+
+/**
+ * Multi-provider SMS routing registry. Populated by `seedProviders()` on boot
+ * with priority defaults (tellabot=1, fivesim=2, smsactivate=3). Admin UI can
+ * toggle `enabled` and re-rank `priority`. Worker writes `last_health_at`,
+ * `last_balance_cents`, `last_error` every minute (health) / 5 minutes (balance).
+ */
+export const providers = pgTable(
+  "providers",
+  {
+    id: serial("id").primaryKey(),
+    slug: text("slug").notNull().unique(),
+    name: text("name").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    priority: integer("priority").notNull().default(100),
+    lastHealthAt: timestamp("last_health_at", { withTimezone: true }),
+    lastBalanceCents: integer("last_balance_cents"),
+    lastError: text("last_error"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    enabledPriority: index("idx_providers_enabled_priority").on(t.enabled, t.priority),
+  }),
+);
