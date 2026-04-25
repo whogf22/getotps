@@ -34,16 +34,38 @@ services:
     ports:
       - "6379:6379"
 
-  # Optional: terminate TLS at the edge and reverse-proxy to `app:5000`
-  # nginx:
-  #   image: nginx:alpine
-  #   volumes:
-  #     - ./nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
-  #   ports:
-  #     - "80:80"
-  #     - "443:443"
-  #   depends_on:
-  #     - app
+  nginx:
+    image: nginx:alpine
+    volumes:
+      - ./nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - certbot-webroot:/var/www/certbot
+      - letsencrypt:/etc/letsencrypt
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - app
+
+  certbot:
+    image: certbot/certbot:latest
+    volumes:
+      - certbot-webroot:/var/www/certbot
+      - letsencrypt:/etc/letsencrypt
+    command:
+      [
+        "certonly",
+        "--webroot",
+        "-w",
+        "/var/www/certbot",
+        "-d",
+        "getotps.com",
+        "--email",
+        "admin@getotps.com",
+        "--agree-tos",
+        "--non-interactive",
+      ]
 
 volumes:
   pgdata:
+  certbot-webroot:
+  letsencrypt:

@@ -9,6 +9,12 @@ import {
   Users,
   Wallet,
   Settings,
+  Receipt,
+  Truck,
+  Package,
+  HandCoins,
+  KeyRound,
+  ClipboardList,
   LogOut,
   Moon,
   Sun,
@@ -21,8 +27,14 @@ import {
 const adminNavItems = [
   { href: "/admin", label: "Overview", icon: LayoutDashboard },
   { href: "/admin/users", label: "Users", icon: Users },
+  { href: "/admin/orders", label: "Orders", icon: Receipt },
   { href: "/admin/deposits", label: "Deposits", icon: Wallet },
   { href: "/admin/services", label: "Services", icon: Settings },
+  { href: "/admin/providers", label: "Providers", icon: Truck },
+  { href: "/admin/bundles", label: "Bundles", icon: Package },
+  { href: "/admin/referrals", label: "Referrals", icon: HandCoins },
+  { href: "/admin/api-plans", label: "API Plans", icon: KeyRound },
+  { href: "/admin/audit-logs", label: "Audit Logs", icon: ClipboardList },
 ];
 
 interface AdminLayoutProps {
@@ -67,9 +79,10 @@ export function AdminLayout({ children, title, description }: AdminLayoutProps) 
             <Link key={href} href={href}>
               <a
                 className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all cursor-pointer
-                  ${active
-                    ? "bg-orange-500/15 text-orange-600 dark:text-orange-400"
-                    : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                  ${
+                    active
+                      ? "bg-orange-500/15 text-orange-600 dark:text-orange-400"
+                      : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
                   }
                   ${collapsed ? "justify-center" : ""}
                 `}
@@ -87,7 +100,9 @@ export function AdminLayout({ children, title, description }: AdminLayoutProps) 
       {/* Bottom actions */}
       <div className="p-3 border-t border-sidebar-border space-y-1">
         <Link href="/dashboard">
-          <a className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-sidebar-foreground hover:bg-sidebar-accent w-full transition-colors ${collapsed ? "justify-center" : ""}`}>
+          <a
+            className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-sidebar-foreground hover:bg-sidebar-accent w-full transition-colors ${collapsed ? "justify-center" : ""}`}
+          >
             <ArrowLeft className="w-4 h-4 shrink-0" />
             {!collapsed && <span>Back to App</span>}
           </a>
@@ -154,9 +169,7 @@ export function AdminLayout({ children, title, description }: AdminLayoutProps) 
         </header>
 
         {/* Page Content */}
-        <main className="flex-1 overflow-auto p-4 md:p-6">
-          {children}
-        </main>
+        <main className="flex-1 overflow-auto p-4 md:p-6">{children}</main>
       </div>
     </div>
   );

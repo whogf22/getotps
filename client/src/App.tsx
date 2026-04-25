@@ -22,10 +22,18 @@ import SupportPage from "@/pages/Support";
 import FaqPage from "@/pages/Faq";
 import Terms from "@/pages/Terms";
 import Privacy from "@/pages/Privacy";
+import Pricing from "@/pages/Pricing";
+import Refund from "@/pages/Refund";
 import AdminOverview from "@/pages/admin/AdminOverview";
 import AdminUsers from "@/pages/admin/AdminUsers";
 import AdminDeposits from "@/pages/admin/AdminDeposits";
 import AdminServices from "@/pages/admin/AdminServices";
+import AdminOrders from "@/pages/admin/AdminOrders";
+import AdminProviders from "@/pages/admin/AdminProviders";
+import AdminBundles from "@/pages/admin/AdminBundles";
+import AdminReferrals from "@/pages/admin/AdminReferrals";
+import AdminApiPlans from "@/pages/admin/AdminApiPlans";
+import AdminAuditLogs from "@/pages/admin/AdminAuditLogs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { VersionBanner } from "@/components/VersionBanner";
 
@@ -86,21 +94,29 @@ function AppRouter() {
       <Route path="/register" component={Register} />
       <Route path="/terms" component={Terms} />
       <Route path="/privacy" component={Privacy} />
+      <Route path="/pricing" component={Pricing} />
+      <Route path="/refund" component={Refund} />
       <Route path="/dashboard" component={() => <ProtectedRoute component={Dashboard} />} />
       <Route path="/buy" component={() => <ProtectedRoute component={BuyNumber} />} />
       <Route path="/active" component={() => <ProtectedRoute component={ActiveNumbers} />} />
       <Route path="/history" component={() => <ProtectedRoute component={History} />} />
       <Route path="/funds" component={() => <ProtectedRoute component={AddFunds} />} />
-      <Route path="/api-docs" component={() => <ProtectedRoute component={ApiDocs} />} />
+      <Route path="/api-docs" component={ApiDocs} />
       <Route path="/profile" component={() => <ProtectedRoute component={Profile} />} />
       <Route path="/changelog" component={() => <ProtectedRoute component={ChangelogPage} />} />
       <Route path="/support" component={() => <ProtectedRoute component={SupportPage} />} />
-      <Route path="/faq" component={() => <ProtectedRoute component={FaqPage} />} />
+      <Route path="/faq" component={FaqPage} />
       {/* Admin routes */}
       <Route path="/admin" component={() => <AdminRoute component={AdminOverview} />} />
       <Route path="/admin/users" component={() => <AdminRoute component={AdminUsers} />} />
       <Route path="/admin/deposits" component={() => <AdminRoute component={AdminDeposits} />} />
       <Route path="/admin/services" component={() => <AdminRoute component={AdminServices} />} />
+      <Route path="/admin/orders" component={() => <AdminRoute component={AdminOrders} />} />
+      <Route path="/admin/providers" component={() => <AdminRoute component={AdminProviders} />} />
+      <Route path="/admin/bundles" component={() => <AdminRoute component={AdminBundles} />} />
+      <Route path="/admin/referrals" component={() => <AdminRoute component={AdminReferrals} />} />
+      <Route path="/admin/api-plans" component={() => <AdminRoute component={AdminApiPlans} />} />
+      <Route path="/admin/audit-logs" component={() => <AdminRoute component={AdminAuditLogs} />} />
       <Route component={NotFound} />
     </Switch>
   );

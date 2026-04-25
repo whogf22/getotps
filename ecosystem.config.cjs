@@ -2,11 +2,12 @@
 module.exports = {
   apps: [
     {
-      name: "getotps",
+      name: "getotps-app",
       script: "dist/index.cjs",
       cwd: __dirname,
-      instances: 1,
-      exec_mode: "fork",
+      instances: "max",
+      exec_mode: "cluster",
+      max_memory_restart: "400M",
       env: { NODE_ENV: "production" },
     },
     {
@@ -15,6 +16,7 @@ module.exports = {
       cwd: __dirname,
       instances: 1,
       exec_mode: "fork",
+      max_memory_restart: "300M",
       env: { NODE_ENV: "production" },
     },
   ],
