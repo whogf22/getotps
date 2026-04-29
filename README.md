@@ -4,7 +4,7 @@
 [![Node](https://img.shields.io/badge/node-20.x-339933?logo=node.js&logoColor=white)]()
 [![License](https://img.shields.io/badge/license-Proprietary-blue)]()
 
-A production-grade virtual number / OTP rental service. Users buy disposable phone numbers to receive SMS verification codes for any online service. Live on **getotps.com** and **getotps.online**.
+A production-grade virtual number / OTP rental service. Users buy disposable phone numbers to receive SMS verification codes for any online service. Live on **getotps.com**.
 
 ---
 
