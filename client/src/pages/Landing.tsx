@@ -158,7 +158,6 @@ export default function Landing() {
 
       {/* ===== HERO ===== */}
       <section className="relative py-24 md:py-36 overflow-hidden">
-        {/* Animated gradient background */}
         <div className="absolute inset-0 overflow-hidden pointer-events-none">
           <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[800px] bg-gradient-to-br from-primary/10 via-cyan-500/5 to-purple-500/5 rounded-full blur-[120px] animate-pulse" style={{ animationDuration: "8s" }} />
           <div className="absolute top-40 -right-20 w-[400px] h-[400px] bg-cyan-500/8 rounded-full blur-[80px]" />
@@ -308,8 +307,9 @@ export default function Landing() {
           ))}
         </motion.div>
 
+        {/* Browse All links to /buy — the service catalog page (requires login) */}
         <motion.div variants={fadeUp} className="text-center mt-8">
-          <Link href="/buy-number"><a><Button variant="outline" size="lg">Browse All 500+ Services <ArrowRight className="w-4 h-4 ml-2" /></Button></a></Link>
+          <Link href="/buy"><a><Button variant="outline" size="lg">Browse All 500+ Services <ArrowRight className="w-4 h-4 ml-2" /></Button></a></Link>
         </motion.div>
       </Section>
 
@@ -509,7 +509,6 @@ export default function Landing() {
         </div>
       </footer>
 
-      {/* Shimmer animation keyframe */}
       <style>{`
         @keyframes shimmer {
           0%, 100% { background-position: 0% 50%; }

@@ -4,5 +4,10 @@ Disallow: /api/
 Disallow: /#/dashboard
 Disallow: /#/admin
 Disallow: /#/profile
+Disallow: /#/api-docs
+Disallow: /#/history
+Disallow: /#/active
+Disallow: /#/funds
+Disallow: /#/buy
 
 Sitemap: https://getotps.com/sitemap.xml
