@@ -295,7 +295,7 @@ export default function Landing() {
         </motion.div>
 
         <motion.div variants={fadeUp} className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
-          {(services || POPULAR_SERVICES).slice(0, 12).map((svc: any, idx: number) => (
+          {(services && services.length > 0 ? services : POPULAR_SERVICES).slice(0, 12).map((svc: any, idx: number) => (
             <Card key={idx} className="border-border hover:border-primary/40 transition-all hover:shadow-md cursor-pointer group">
               <CardContent className="p-4 text-center">
                 <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center mx-auto mb-2 group-hover:scale-110 transition-transform">
@@ -309,7 +309,7 @@ export default function Landing() {
         </motion.div>
 
         <motion.div variants={fadeUp} className="text-center mt-8">
-          <Link href="/register"><a><Button variant="outline" size="lg">Browse All 500+ Services <ArrowRight className="w-4 h-4 ml-2" /></Button></a></Link>
+          <Link href="/buy-number"><a><Button variant="outline" size="lg">Browse All 500+ Services <ArrowRight className="w-4 h-4 ml-2" /></Button></a></Link>
         </motion.div>
       </Section>
 
