@@ -10,6 +10,18 @@ export function serveStatic(app: Express) {
     );
   }
 
+  // Serve favicon.svg with correct content-type explicitly
+  app.get("/favicon.svg", (_req, res) => {
+    const faviconPath = path.resolve(distPath, "favicon.svg");
+    if (fs.existsSync(faviconPath)) {
+      res.setHeader("Content-Type", "image/svg+xml");
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      res.sendFile(faviconPath);
+    } else {
+      res.status(404).end();
+    }
+  });
+
   app.use(
     express.static(distPath, {
       setHeaders: (res, filePath) => {
@@ -24,8 +36,12 @@ export function serveStatic(app: Express) {
     }),
   );
 
-  // fall through to index.html if the file doesn't exist
-  app.use("/{*path}", (_req, res) => {
+  // Fall through to index.html for SPA routes only — not for asset file requests
+  app.use("/{*path}", (req, res) => {
+    if (/\.\w{1,10}$/.test(req.path)) {
+      // A file extension was requested but not found — return 404 instead of serving index.html
+      return res.status(404).end();
+    }
     res.setHeader("Cache-Control", "no-cache, must-revalidate");
     res.sendFile(path.resolve(distPath, "index.html"));
   });

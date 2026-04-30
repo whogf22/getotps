@@ -27,6 +27,11 @@ export default function Register() {
       toast({ title: "Error", description: "Please fill in all fields", variant: "destructive" });
       return;
     }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+    if (!emailRegex.test(email)) {
+      toast({ title: "Error", description: "Please enter a valid email address", variant: "destructive" });
+      return;
+    }
     if (password.length < 8) {
       toast({ title: "Error", description: "Password must be at least 8 characters", variant: "destructive" });
       return;
@@ -79,7 +84,7 @@ export default function Register() {
                 <Label htmlFor="email" className="text-sm">Email</Label>
                 <Input
                   id="email"
-                  type="email"
+                  type="text"
                   placeholder="you@example.com"
                   value={email}
                   onChange={e => setEmail(e.target.value)}

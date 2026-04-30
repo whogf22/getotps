@@ -20,15 +20,19 @@ export default function Login() {
   const [, navigate] = useLocation();
   const { toast } = useToast();
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!email || !password) {
+    // Read from DOM directly to capture browser autofill values (autofill does not trigger React onChange)
+    const form = e.currentTarget;
+    const emailVal = ((form.elements.namedItem("email") as HTMLInputElement)?.value ?? "").trim() || email.trim();
+    const passwordVal = (form.elements.namedItem("password") as HTMLInputElement)?.value ?? password;
+    if (!emailVal || !passwordVal) {
       toast({ title: "Error", description: "Please fill in all fields", variant: "destructive" });
       return;
     }
     setLoading(true);
     try {
-      await login(email, password);
+      await login(emailVal, passwordVal);
       window.location.hash = "/dashboard";
     } catch (err: any) {
       toast({ title: "Login failed", description: err.message || "Invalid credentials", variant: "destructive" });
@@ -63,6 +67,7 @@ export default function Login() {
                 <Label htmlFor="email" className="text-sm">Email</Label>
                 <Input
                   id="email"
+                  name="email"
                   type="email"
                   placeholder="you@example.com"
                   value={email}
@@ -77,6 +82,7 @@ export default function Login() {
                 <div className="relative">
                   <Input
                     id="password"
+                    name="password"
                     type={showPassword ? "text" : "password"}
                     placeholder="••••••••"
                     value={password}
