@@ -1,0 +1,81 @@
+name: OAI VPS Inventory
+
+on:
+  push:
+    branches:
+      - agent/vps-recovery
+    paths:
+      - .github/workflows/oai-vps-inventory.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    name: Read-only VPS inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Inspect production VPS over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script_stop: false
+          command_timeout: 8m
+          script: |
+            set +e
+            echo '=== IDENTITY ==='
+            date -u
+            hostnamectl 2>/dev/null | sed -n '1,12p'
+            id
+            echo
+            echo '=== RESOURCES ==='
+            uptime
+            df -hT / /var 2>/dev/null
+            free -h
+            echo
+            echo '=== LISTENING PORTS ==='
+            sudo ss -lntup 2>/dev/null | sed -n '1,120p'
+            echo
+            echo '=== FIREWALL ==='
+            sudo ufw status verbose 2>/dev/null || true
+            echo
+            echo '=== DOCKER ==='
+            sudo docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || echo 'docker unavailable'
+            echo
+            echo '=== DOCKER COMPOSE PROJECTS ==='
+            sudo docker compose ls 2>/dev/null || true
+            echo
+            echo '=== PM2 ==='
+            sudo -u root pm2 list 2>/dev/null || pm2 list 2>/dev/null || echo 'pm2 unavailable'
+            echo
+            echo '=== NGINX SITES ==='
+            sudo nginx -T 2>/dev/null | grep -E '(^# configuration file|server_name|proxy_pass|root )' | sed -n '1,240p'
+            echo
+            echo '=== CADDY/TRAEFIK ==='
+            sudo systemctl --no-pager --full status caddy traefik 2>/dev/null | sed -n '1,120p' || true
+            echo
+            echo '=== RUNNING APP SERVICES ==='
+            sudo systemctl list-units --type=service --state=running --no-pager 2>/dev/null | grep -Ei 'node|pm2|docker|coolify|nginx|caddy|postgres|redis|cardxc|getotps|exchangee' || true
+            echo
+            echo '=== PROJECT DIRECTORIES ==='
+            sudo find /var/www /opt /srv /home -maxdepth 4 -type f \( -name package.json -o -name docker-compose.yml -o -name compose.yml -o -name ecosystem.config.cjs -o -name ecosystem.config.js \) -printf '%h/%f\n' 2>/dev/null | sort -u | sed -n '1,300p'
+            echo
+            echo '=== GIT CHECKOUTS (REMOTE URL ONLY) ==='
+            while IFS= read -r gitdir; do
+              repo="${gitdir%/.git}"
+              printf '%s :: ' "$repo"
+              sudo git -C "$repo" remote get-url origin 2>/dev/null | sed -E 's#https://[^/@]+@#https://***@#' || echo 'no origin'
+              sudo git -C "$repo" status -sb 2>/dev/null | head -1
+            done < <(sudo find /var/www /opt /srv /home -maxdepth 5 -type d -name .git 2>/dev/null | sort -u)
+            echo
+            echo '=== DATABASE FILE LOCATIONS (NAMES/SIZES ONLY) ==='
+            sudo find /var/www /opt /srv -maxdepth 6 -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -printf '%p %s bytes\n' 2>/dev/null | sort | sed -n '1,200p'
+            echo
+            echo '=== RECENT SERVICE FAILURES ==='
+            sudo systemctl --failed --no-pager 2>/dev/null || true
+            echo
+            echo '=== END INVENTORY ==='
